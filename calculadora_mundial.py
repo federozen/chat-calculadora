@@ -616,10 +616,33 @@ def matches_a_texto(matches):
     return "\n".join(out).strip()
 
 def traer_de_api(token, comp="WC"):
-    r = requests.get(f"https://api.football-data.org/v4/competitions/{comp}/matches",
-                     headers={"X-Auth-Token": token}, timeout=30)
-    r.raise_for_status()
-    return r.json().get("matches", [])
+    base = f"https://api.football-data.org/v4/competitions/{comp}"
+    h = {"X-Auth-Token": (token or "").strip()}
+    r = requests.get(base + "/matches", headers=h, timeout=30)
+    if r.status_code == 200:
+        return r.json().get("matches", [])
+    # football-data manda el motivo real en el cuerpo JSON
+    try:
+        msg = r.json().get("message", "") or r.text[:200]
+    except Exception:
+        msg = (r.text or "")[:200]
+    # Si falla sin temporada, busco la temporada actual y reintento (útil para copas como el Mundial)
+    try:
+        info = requests.get(base, headers=h, timeout=30)
+        if info.status_code == 200:
+            cs = info.json().get("currentSeason") or {}
+            yr = str(cs.get("startDate") or "")[:4]
+            if yr:
+                r2 = requests.get(base + f"/matches?season={yr}", headers=h, timeout=30)
+                if r2.status_code == 200:
+                    return r2.json().get("matches", [])
+                try:
+                    msg = r2.json().get("message", "") or msg
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    raise RuntimeError(f"{r.status_code} — {msg}" if msg else f"{r.status_code} (sin detalle de la API)")
 
 def listar_competiciones(token):
     r = requests.get("https://api.football-data.org/v4/competitions",
@@ -786,23 +809,54 @@ def detectar_equipo(q, equipos):
     return None
 
 
+# ─── NAVEGACIÓN ENTRE GRUPOS (si se cargó el torneo completo) ─────────────────────
+def _tour_grupos():
+    """Devuelve {label: (equipos, jugados, pendientes)} desde el texto del torneo."""
+    txt = st.session_state.get("texto_torneo_cache", "")
+    if not txt or not txt.strip():
+        return {}
+    out = {}
+    for lab, sub in dividir_grupos(txt).items():
+        try:
+            eqs, jug, pen = parsear_resultados(sub)
+        except Exception:
+            continue
+        if len(eqs) >= 3:
+            out[lab] = (eqs, jug, pen)
+    return out
+
+
+def _buscar_grupo_de(team_q):
+    for lab, (eqs, jug, pen) in _tour_grupos().items():
+        t = detectar_equipo(team_q, eqs)
+        if t:
+            return lab, t, (eqs, jug, pen)
+    return None, None, None
+
+
 AYUDA_MD = """**¿Qué puedo responder?** Por ejemplo:
 
 - **¿Qué necesita España?** — qué tiene que pasar para clasificar (y si puede, para ser campeón / mejor tercero).
 - **¿Qué le conviene a Uruguay?** — qué resultado propio le sirve y qué hinchar en los otros partidos.
+- **¿En qué grupo está Brasil?** · **Equipos del grupo C** · **¿Qué grupos hay?**
 - **¿Puede ser campeón Cabo Verde?** · **¿Qué necesita Arabia para no descender?**
-- **Tabla** · **Panorama** · **Probabilidades**
-- **Número mágico de España** · **Máximos** · **Asegurados** (cuentas de liga).
+- **Tabla** · **Panorama** · **Probabilidades** · **Número mágico de España** · **Asegurados**
 
-Si a un equipo le quedan **varios partidos**, te respondo por **puntos** (con cuántos clasifica)."""
+Si preguntás por un equipo de otro grupo, **cambio solo** a ese grupo. Y si a un equipo le quedan
+varios partidos, te respondo por **puntos** (con cuántos clasifica)."""
 
-BIENVENIDA = ("👋 Soy la **calculadora de escenarios**. Preguntame en lenguaje natural, por ejemplo "
-              "*«¿qué necesita España?»*, *«¿qué le conviene a Uruguay?»*, *«tabla»* o *«probabilidades»*. "
-              "Escribí **ayuda** para ver todo lo que puedo responder.")
+BIENVENIDA = ("👋 Soy la **calculadora de escenarios**. Preguntame en lenguaje natural: "
+              "*«¿qué necesita España?»*, *«¿en qué grupo está Brasil?»*, *«equipos del grupo C»*, "
+              "*«tabla»*… Si no te acordás el grupo de un equipo, preguntá igual y lo busco. "
+              "Escribí **ayuda** para ver todo.")
 
 
 # ─── EJECUTOR DETERMINÍSTICO (las cuentas las hace el motor, nunca el LLM) ─────────
-def ejecutar_accion(intent, equipo, objetivo, n):
+def ejecutar_accion(acc):
+    intent = acc.get("intent")
+    equipo = acc.get("equipo")
+    objetivo = acc.get("objetivo")
+    n = acc.get("n")
     E = st.session_state.ESTADO
     eqs, jug, pen, esc = E["equipos"], E["jugados"], E["pendientes"], E["esc"]
     if equipo and equipo not in eqs:
@@ -858,7 +912,7 @@ def ejecutar_accion(intent, equipo, objetivo, n):
         obj, nn = "descenso", (n or 1)
     elif objetivo == "tercero":
         obj, nn = "tercero", 3
-    else:  # clasificar
+    else:
         obj, nn = "top", (n or DIRECTO())
     es_default = (obj == "top" and nn == DIRECTO())
 
@@ -889,59 +943,115 @@ def ejecutar_accion(intent, equipo, objetivo, n):
     return blocks
 
 
+# ─── BLOQUES DE NAVEGACIÓN ────────────────────────────────────────────────────────
+def _bloques_listar_grupos():
+    gs = _tour_grupos()
+    if len(gs) <= 1:
+        return [("info", "Tenés cargado un solo grupo. Para tener todos, pegá o importá el torneo "
+                         "completo desde el panel lateral (API o pegar texto).")]
+    lineas = ["**Grupos cargados:**"]
+    for lab, (eqs, _, _) in gs.items():
+        lineas.append(f"- **Grupo {lab}**: " + ", ".join(eqs))
+    return [("md", "\n".join(lineas))]
+
+
+def _bloques_ver_grupo(lab):
+    gs = _tour_grupos()
+    lab = _norm_txt(lab or "").replace("grupo", "").strip().upper()
+    if lab not in gs:
+        disp = ", ".join(gs) if gs else "—"
+        return [("warning", f"No encuentro el Grupo {lab}. Disponibles: {disp}. "
+                            "(Si falta, cargá el torneo completo en el panel lateral.)")]
+    eqs, jug, pen = gs[lab]
+    cargar_estado(eqs, jug, pen)
+    return [("success", f"Cargué el **Grupo {lab}**: {', '.join(eqs)}."),
+            ("df", tabla(eqs, jug), f"Grupo {lab} — tabla actual"),
+            ("info", resumen_grupo_texto(eqs, jug, st.session_state.ESTADO["esc"], pen))]
+
+
+def _bloques_buscar_equipo(team_q):
+    lab, team, datos = _buscar_grupo_de(team_q)
+    if not lab:
+        gs = _tour_grupos()
+        if len(gs) <= 1:
+            return [("warning", f"Solo tengo un grupo cargado, así que no puedo buscar en otros. "
+                                "Cargá el torneo completo (API o pegar) desde el panel lateral.")]
+        return [("warning", f"No encontré ese equipo en los grupos cargados. ¿Está bien escrito?")]
+    eqs, jug, pen = datos
+    cargar_estado(eqs, jug, pen)
+    comp = [e for e in eqs if e != team]
+    return [("success", f"**{team}** está en el **Grupo {lab}**, junto a {', '.join(comp)}."),
+            ("info", f"Cambié a ese grupo: ya podés preguntar, por ejemplo «¿qué necesita {team}?»."),
+            ("df", tabla(eqs, jug), f"Grupo {lab} — tabla actual")]
+
+
 # ─── ROUTER POR PALABRAS CLAVE (fallback, sin LLM) ────────────────────────────────
 def _parse_kw(q):
     qn = _norm_txt(q)
     eqs = st.session_state.ESTADO["equipos"]
     team = detectar_equipo(q, eqs)
     has = lambda *ws: any(w in qn for w in ws)
-    m = _re.search(r"top\s*(\d+)|primeros?\s*(\d+)|(\d+)\s*primeros|cupos?\s*(\d+)|puesto\s*(\d+)|(\d+)\s*[oº]", qn)
+    m = _re.search(r"top\s*(\d+)|primeros?\s*(\d+)|(\d+)\s*primeros|puesto\s*(\d+)|(\d+)\s*[oº]", qn)
     n_det = int(next(g for g in m.groups() if g)) if m else None
+    mg = _re.search(r"grupo\s+([a-l])\b", qn)
 
-    if has("ayuda", "help", "que puedo", "como funciona", "que sabes"):
-        return ("ayuda", None, None, None)
+    if has("ayuda", "help", "que puedo", "como funciona"):
+        return {"intent": "ayuda"}
+    # navegación de grupos
+    if has("en que grupo", "en cual grupo", "donde juega", "donde esta", "de que grupo", "grupo de", "que grupo es"):
+        return {"intent": "buscar_equipo", "equipo": q}
+    if has("que grupos", "cuales grupos", "lista de grupos", "todos los grupos", "ver grupos") or qn.strip() == "grupos":
+        return {"intent": "listar_grupos"}
+    if mg and has("grupo"):
+        return {"intent": "ver_grupo", "grupo": mg.group(1)}
+
     if has("tabla", "posicion") and not has("conviene", "necesita"):
-        return ("tabla", None, None, None)
-    if has("panorama", "pantallazo", "como esta el grupo", "como viene", "estado del grupo") or (has("resumen") and not team):
-        return ("panorama", None, None, None)
+        return {"intent": "tabla"}
+    if has("panorama", "pantallazo", "como esta el grupo", "como viene") or (has("resumen") and not team):
+        return {"intent": "panorama"}
     if has("probabilidad", "chance", "porcentaje"):
-        return ("probabilidades", None, None, None)
+        return {"intent": "probabilidades"}
     if has("maximo", "puntos posibles", "techo"):
-        return ("maximos", None, None, None)
+        return {"intent": "maximos"}
     if has("asegurad", "eliminad", "quien esta adentro", "clasificado"):
-        return ("asegurados", None, None, n_det)
+        return {"intent": "asegurados", "n": n_det}
     if has("numero magico", "magico", "asegurar"):
-        return ("numero_magico", team, "campeon" if has("campeon", "primero") else None, n_det)
+        return {"intent": "numero_magico", "equipo": team, "objetivo": "campeon" if has("campeon", "primero") else None, "n": n_det}
     if has("conviene", "le sirve", "hinchar", "para quien", "le rinde"):
-        return ("conviene", team, None, None)
+        return {"intent": "conviene", "equipo": team}
     if has("exacto", "exactamente") and n_det:
-        return ("puesto_exacto", team, None, n_det)
+        return {"intent": "puesto_exacto", "equipo": team, "n": n_det}
     if has("campeon", "salir primero", "ganar el grupo", "ganar la zona"):
-        return ("necesita", team, "campeon", None)
+        return {"intent": "necesita", "equipo": team, "objetivo": "campeon"}
     if has("champions"):
-        return ("necesita", team, "champions", None)
+        return {"intent": "necesita", "equipo": team, "objetivo": "champions"}
     if has("descenso", "descender", "salvar", "no bajar"):
-        return ("necesita", team, "descenso", n_det or 1)
+        return {"intent": "necesita", "equipo": team, "objetivo": "descenso", "n": n_det or 1}
     if has("tercero", "mejor tercero"):
-        return ("necesita", team, "tercero", None)
-    return ("necesita", team, "clasificar", n_det)
+        return {"intent": "necesita", "equipo": team, "objetivo": "tercero"}
+    return {"intent": "necesita", "equipo": team, "objetivo": "clasificar", "n": n_det}
 
 
 # ─── ROUTER CON LLM (solo interpreta; las cuentas siguen en Python) ────────────────
 def _llm_parse(q):
-    eqs = st.session_state.ESTADO["equipos"]
+    gs = _tour_grupos()
+    if gs:
+        contexto = "Grupos y equipos del torneo:\n" + "\n".join(f"- Grupo {lab}: {', '.join(d[0])}" for lab, d in gs.items())
+    else:
+        contexto = "Equipos del grupo cargado: " + ", ".join(st.session_state.ESTADO["equipos"])
     sistema = (
-        "Sos un router de intención para una calculadora de escenarios de fútbol. "
-        f"Los equipos del grupo son: {', '.join(eqs)}. "
-        "Dada la consulta del usuario, respondé EXCLUSIVAMENTE un objeto JSON (sin texto adicional, sin ```), con estas claves:\n"
-        '- "intent": uno de [necesita, conviene, tabla, panorama, probabilidades, numero_magico, asegurados, maximos, puesto_exacto, ayuda]\n'
-        f'- "equipo": el nombre EXACTO de un equipo de la lista, o null\n'
-        '- "objetivo": solo si intent=necesita, uno de [clasificar, campeon, champions, descenso, tercero]; default "clasificar"\n'
-        '- "n": entero o null (para top N, descenso N, puesto exacto N)\n'
-        '- "intro": una frase breve en español rioplatense que presente la respuesta, SIN dar números ni resultados (solo el encuadre).\n'
-        "Reglas: 'campeón'/'salir primero'/'ganar el grupo' => objetivo campeon. "
-        "'no descender'/'salvarse' => descenso. 'octavos'/'clasificar'/'pasar' => clasificar. "
-        "Si no entendés, intent='ayuda'."
+        "Sos un router de intención para una calculadora de escenarios de fútbol.\n" + contexto + "\n\n"
+        "Respondé EXCLUSIVAMENTE un objeto JSON (sin texto extra, sin ```), con estas claves:\n"
+        '- "intent": uno de [necesita, conviene, tabla, panorama, probabilidades, numero_magico, '
+        'asegurados, maximos, puesto_exacto, buscar_equipo, ver_grupo, listar_grupos, ayuda]\n'
+        '- "equipo": nombre EXACTO de un equipo (de cualquier grupo) o null\n'
+        '- "grupo": letra del grupo (para ver_grupo) o null\n'
+        '- "objetivo": solo si intent=necesita: [clasificar, campeon, champions, descenso, tercero]; default clasificar\n'
+        '- "n": entero o null\n'
+        '- "intro": una frase breve en español rioplatense que presente la respuesta, SIN dar números ni resultados.\n'
+        "Pistas: 'en qué grupo está X'/'dónde juega X' => buscar_equipo (equipo=X). "
+        "'equipos del grupo C'/'grupo C' => ver_grupo (grupo='C'). 'qué grupos hay' => listar_grupos. "
+        "'campeón'/'ganar el grupo' => objetivo campeon. 'no descender' => descenso."
     )
     body = {"model": st.session_state.LLM_MODEL, "max_tokens": 400,
             "system": sistema, "messages": [{"role": "user", "content": q}]}
@@ -954,28 +1064,43 @@ def _llm_parse(q):
     data = r.json()
     txt = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text").strip()
     obj = json.loads(txt[txt.find("{"): txt.rfind("}") + 1])
-    intent = obj.get("intent") or "ayuda"
-    equipo = obj.get("equipo")
-    if equipo:
-        equipo = detectar_equipo(equipo, eqs) or equipo
-    return (intent, equipo, obj.get("objetivo"), obj.get("n")), obj.get("intro")
+    return obj, obj.get("intro")
 
 
 def responder(q):
-    usar_llm = st.session_state.LLM_ON and st.session_state.LLM_KEY.strip()
+    usar_llm = st.session_state.LLM_ON and str(st.session_state.LLM_KEY).strip()
     intro = None
     if usar_llm:
         try:
-            accion, intro = _llm_parse(q)
+            acc, intro = _llm_parse(q)
         except Exception as e:
-            accion, intro = _parse_kw(q), None
-            st.toast(f"LLM no disponible ({str(e)[:60]}…); uso el router por palabras.")
+            acc = _parse_kw(q)
+            st.toast(f"LLM no disponible ({str(e)[:50]}…); uso el router por palabras.")
     else:
-        accion = _parse_kw(q)
-    blocks = ejecutar_accion(*accion)
-    if intro:
-        blocks = [("md", f"_{intro}_")] + blocks
-    return blocks
+        acc = _parse_kw(q)
+
+    pre = [("md", f"_{intro}_")] if intro else []
+    intent = acc.get("intent")
+
+    if intent == "listar_grupos":
+        return pre + _bloques_listar_grupos()
+    if intent == "ver_grupo":
+        return pre + _bloques_ver_grupo(acc.get("grupo"))
+    if intent == "buscar_equipo":
+        return pre + _bloques_buscar_equipo(acc.get("equipo") or q)
+
+    # Cambio automático de grupo si el equipo no está en el grupo cargado
+    cur = st.session_state.ESTADO["equipos"]
+    team_intents = {"necesita", "conviene", "numero_magico", "puesto_exacto"}
+    ya = acc.get("equipo") and detectar_equipo(acc["equipo"], cur)
+    if intent in team_intents and not ya:
+        lab, team, datos = _buscar_grupo_de(acc.get("equipo") or q)
+        if lab:
+            cargar_estado(*datos)
+            acc["equipo"] = team
+            pre = pre + [("info", f"Cambié al Grupo {lab}, donde juega {team}.")]
+
+    return pre + ejecutar_accion(acc)
 
 
 def render_blocks(blocks):
@@ -1006,12 +1131,11 @@ with st.sidebar:
         help="Si lo activás, entiende preguntas más libres. Las cuentas siempre las hace el motor.")
     if st.session_state.LLM_ON:
         st.session_state.LLM_KEY = st.text_input(
-            "Anthropic API key", value=st.session_state.LLM_KEY, type="password",
-            placeholder="sk-ant-...")
+            "Anthropic API key", value=st.session_state.LLM_KEY, type="password", placeholder="sk-ant-...")
         st.session_state.LLM_MODEL = st.text_input(
             "Modelo", value=st.session_state.LLM_MODEL,
             help="Ej.: claude-haiku-4-5 (rápido y barato), claude-sonnet-4-6, claude-opus-4-8.")
-        if not st.session_state.LLM_KEY.strip():
+        if not str(st.session_state.LLM_KEY).strip():
             st.caption("Sin key, uso el router por palabras clave.")
     if st.button("🧹 Limpiar conversación", use_container_width=True):
         st.session_state.chat = [{"role": "assistant", "blocks": [("md", BIENVENIDA)]}]
@@ -1019,8 +1143,14 @@ with st.sidebar:
 
 
 # ─── CHAT ────────────────────────────────────────────────────────────────────────
-modo = "🤖 con Claude" if (st.session_state.LLM_ON and st.session_state.LLM_KEY.strip()) else "🔤 por palabras clave"
-st.subheader(f"💬 Consultá los escenarios del grupo · {modo}")
+modo = "🤖 con Claude" if (st.session_state.LLM_ON and str(st.session_state.LLM_KEY).strip()) else "🔤 por palabras clave"
+st.subheader(f"💬 Consultá los escenarios · {modo}")
+
+_gs_tot = _tour_grupos()
+if len(_gs_tot) > 1:
+    st.caption(f"✅ Tenés **{len(_gs_tot)} grupos** cargados ({', '.join(_gs_tot)}). "
+               "Preguntá por **cualquier** equipo: si es de otro grupo, cambio solo. "
+               "Probá «¿en qué grupo está Brasil?» o «¿qué grupos hay?».")
 
 if "chat" not in st.session_state:
     st.session_state.chat = [{"role": "assistant", "blocks": [("md", BIENVENIDA)]}]
@@ -1030,14 +1160,14 @@ for msg in st.session_state.chat:
         render_blocks(msg["blocks"])
 
 st.caption("Sugerencias rápidas:")
-sug = [f"¿Qué necesita {equipos[0]}?", "Tabla", "Panorama",
+sug = [f"¿Qué necesita {equipos[0]}?", "¿Qué grupos hay?", "Tabla",
        f"¿Qué le conviene a {equipos[1]}?", "Probabilidades", "Ayuda"]
 clic = None
 for c, s in zip(st.columns(len(sug)), sug):
     if c.button(s, use_container_width=True, key=f"sug_{s}"):
         clic = s
 
-prompt = st.chat_input("Preguntá: «¿qué necesita España?», «¿qué le conviene a Uruguay?», «tabla»…")
+prompt = st.chat_input("Preguntá: «¿qué necesita España?», «¿en qué grupo está Brasil?», «equipos del grupo C»…")
 consulta = prompt or clic
 if consulta:
     st.session_state.chat.append({"role": "user", "blocks": [("md", consulta)]})
