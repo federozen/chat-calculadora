@@ -49,6 +49,12 @@ if "CAMPEON"            not in st.session_state: st.session_state.CAMPEON       
 if "ESTADO"             not in st.session_state: st.session_state.ESTADO             = {}
 if "texto_torneo_cache" not in st.session_state: st.session_state.texto_torneo_cache = ""
 
+def _secret(k, default=""):
+    try:
+        return st.secrets.get(k, default)
+    except Exception:
+        return default
+
 def DIRECTO():          return st.session_state.DIRECTO
 def MEJORES_TERCEROS(): return st.session_state.MEJORES_TERCEROS
 def CAMPEON():          return st.session_state.CAMPEON
@@ -705,7 +711,9 @@ with st.sidebar:
     texto_torneo = ""
 
     if modo_carga == "API football-data.org":
-        token = st.text_input("API Key", type="password", placeholder="Tu token de football-data.org")
+        token = st.text_input("API Key", value=_secret("FOOTBALL_DATA_TOKEN", ""), type="password",
+                               placeholder="Tu token de football-data.org",
+                               help="Cargala una vez en Secrets (FOOTBALL_DATA_TOKEN) y queda precargada.")
         comp  = st.text_input("Código torneo", value="WC", help="WC = Mundial, CL = Champions, etc.")
         col1, col2 = st.columns(2)
         with col1:
