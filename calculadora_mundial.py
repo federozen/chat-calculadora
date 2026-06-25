@@ -285,6 +285,48 @@ def apartado_terceros_texto(equipo, esc, pend):
     lineas.append(que_necesita_texto(equipo, esc, pend, "tercero"))
     return "\n\n".join(lineas)
 
+def _cab_completo(g, d, hay3):
+    pmin, pmax = int(g["_pos"].min()), int(g["_pos"].max())
+    if pmax <= d:            return "✅ CLASIFICA DIRECTO"
+    if pmin <= d:            return "⚠️ DEPENDE (puede entrar directo)"
+    if hay3 and pmax <= 3:   return "⚠️ A LO SUMO 3º (depende de otros grupos)"
+    if hay3 and pmin <= 3:   return "⚠️ DEPENDE (3º o afuera)"
+    return "❌ QUEDA AFUERA"
+
+def _meaning_pos(equipo, g2, pend, d, hay3):
+    pmin, pmax = int(g2["_pos"].min()), int(g2["_pos"].max())
+    rng = f"{pmin}º" if pmin == pmax else f"{pmin}º-{pmax}º"
+    if pmax <= d:
+        return f"→ {rng} · clasifica directo ✅"
+    if pmin <= d:
+        cola = "si no, 3º (depende de otros grupos)" if hay3 else "si no, afuera"
+        return f"→ {rng} · directo según diferencia de gol; {cola} ⚠️"
+    if hay3 and pmax <= 3:
+        return "→ 3º · entra solo si es de los mejores terceros (depende de otros grupos) ⚠️"
+    if hay3 and pmin <= 3:
+        return "→ 3º o peor · si es 3º depende de otros grupos; si no, afuera ⚠️"
+    return f"→ {rng} · afuera ❌"
+
+def que_necesita_completo_texto(equipo, esc, pend):
+    """Árbol único: para cada resultado propio muestra el puesto final (directo / 3º que depende / afuera)."""
+    d = DIRECTO(); hay3 = MEJORES_TERCEROS() > 0
+    df = esc.copy()
+    df["_pos"] = esc[f"Pos {equipo}"].values
+    df["_p"] = df.apply(lambda r: _res_propio(r, equipo, pend), axis=1)
+    df["_o"] = df.apply(lambda r: _res_otros(r, equipo, pend), axis=1)
+    lineas = []
+    for prop, g in sorted(df.groupby("_p"), key=lambda kv: kv[1]["_pos"].mean()):
+        lineas.append(f"**• Si {equipo} {prop}:** {_cab_completo(g, d, hay3)}")
+        uniforme = int(g["_pos"].min()) == int(g["_pos"].max())
+        grupos_otros = sorted(g.groupby("_o"), key=lambda kv: kv[1]["_pos"].mean())
+        if not uniforme:
+            if len(grupos_otros) > 1:
+                for otros, g2 in grupos_otros:
+                    lineas.append(f"&nbsp;&nbsp;&nbsp;&nbsp;· y {otros}: {_meaning_pos(equipo, g2, pend, d, hay3)}")
+            else:
+                lineas.append(f"&nbsp;&nbsp;&nbsp;&nbsp;{_meaning_pos(equipo, g, pend, d, hay3)}")
+    return "\n\n".join(lineas)
+
 def panorama(equipos, jugados, esc, directo=None):
     d = DIRECTO() if directo is None else directo; hay3 = MEJORES_TERCEROS() > 0
     filas = []
@@ -941,12 +983,18 @@ def ejecutar_accion(acc):
         elif es_default and s["eliminado"]:
             blocks.append(("error", f"🔴 {equipo} no llega a zona de clasificación en ningún escenario."))
         else:
-            blocks.append(("md", que_necesita_texto(equipo, esc, pen, obj, n=nn)))
-            if es_default:
-                if s["puede_1"] and not s["ya_1"]:
-                    blocks += [("md", "---"), ("md", que_necesita_texto(equipo, esc, pen, "campeon"))]
-                if MEJORES_TERCEROS() > 0 and s["puede_tercero"] and not s["ya_directo"]:
-                    blocks += [("md", "---"), ("md", apartado_terceros_texto(equipo, esc, pen))]
+            usar_unificado = es_default and MEJORES_TERCEROS() > 0 and s["puede_tercero"] and not s["ya_directo"]
+            if usar_unificado:
+                blocks.append(("md", que_necesita_completo_texto(equipo, esc, pen)))
+                n3, T = s["ntercero"], s["total"]
+                blocks.append(("info",
+                    f"«3º · depende de otros grupos»: quedar tercero clasifica solo si {equipo} entra "
+                    f"entre los {MEJORES_TERCEROS()} mejores terceros del torneo (se compara con los terceros "
+                    f"de los otros grupos). {equipo} termina 3º en {n3}/{T} escenarios."))
+            else:
+                blocks.append(("md", que_necesita_texto(equipo, esc, pen, obj, n=nn)))
+            if es_default and s["puede_1"] and not s["ya_1"]:
+                blocks += [("md", "---"), ("md", que_necesita_texto(equipo, esc, pen, "campeon"))]
     blocks.append(("df", tabla(eqs, jug), "Tabla actual (para ubicarse)"))
     return blocks
 
