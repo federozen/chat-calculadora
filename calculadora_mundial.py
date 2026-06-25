@@ -327,6 +327,137 @@ def que_necesita_completo_texto(equipo, esc, pend):
                 lineas.append(f"&nbsp;&nbsp;&nbsp;&nbsp;{_meaning_pos(equipo, g, pend, d, hay3)}")
     return "\n\n".join(lineas)
 
+def _mask_gana_todos(esc, equipo, pend):
+    mask = pd.Series(True, index=esc.index)
+    for i, l, v in _pd_de(equipo, pend):
+        gl, gv = esc[f"P{i}_gl"], esc[f"P{i}_gv"]
+        mask &= (gl > gv) if l == equipo else (gv > gl)
+    return mask
+
+def en_sus_manos(equipo, esc, pend):
+    """Devuelve (categoría, frase) sobre si el equipo depende de sí mismo."""
+    s = situacion(equipo, esc); d = DIRECTO()
+    if s["ya_directo"]: return ("ya", "ya está clasificado directo, pase lo que pase")
+    if s["eliminado"]: return ("out", "ya no puede clasificar en ningún escenario")
+    own = _pd_de(equipo, pend)
+    if not own:
+        return ("ayuda", "ya jugó todos sus partidos: su suerte depende solo de los otros")
+    mask = _mask_gana_todos(esc, equipo, pend)
+    pos = esc[f"Pos {equipo}"]
+    n = "su partido" if len(own) == 1 else "todos sus partidos"
+    peor = int(pos[mask].max())
+    if peor <= d:
+        return ("manos", f"lo tiene en sus manos: ganando {n} clasifica directo, sin depender de nadie")
+    mejor = int(pos[mask].min())
+    if MEJORES_TERCEROS() > 0 and mejor <= 3:
+        return ("ayuda", f"aun ganando {n} puede no entrar directo; quedaría como posible mejor 3º (depende de otros grupos)")
+    return ("ayuda", f"aun ganando {n} necesita que se den otros resultados")
+
+def en_sus_manos_texto(eqs, jug, esc, pend):
+    icon = {"manos": "🟢", "ayuda": "🟡", "ya": "✅", "out": "🔴"}
+    lineas = ["**¿Quién depende de sí mismo?**"]
+    for _, r in tabla(eqs, jug).iterrows():
+        e = r["Equipo"]; cat, msg = en_sus_manos(e, esc, pend)
+        lineas.append(f"{icon.get(cat, '•')} **{e}** — {msg}")
+    return "\n\n".join(lineas)
+
+def si_terminara_hoy_texto(eqs, jug, pend=None):
+    d = DIRECTO(); hay3 = MEJORES_TERCEROS() > 0
+    lineas = ["**Si la fase terminara hoy (con la tabla actual):**"]
+    for _, r in tabla(eqs, jug).iterrows():
+        p = int(r["Pos"])
+        if p <= d: est = "✅ clasifica directo"
+        elif p == 3 and hay3: est = "🔵 3º — pelearía un lugar entre los mejores terceros"
+        else: est = "🔴 quedaría afuera"
+        lineas.append(f"{p}º **{r['Equipo']}** · {int(r['PTS'])} pts (DG {int(r['DG']):+d}) — {est}")
+    if pend:
+        lineas.append(f"_Todavía falta(n) {len(pend)} partido(s); esto puede cambiar._")
+    return "\n\n".join(lineas)
+
+def relato_equipo_texto(equipo, eqs, jug, esc, pend):
+    d = DIRECTO(); hay3 = MEJORES_TERCEROS() > 0
+    pos = posiciones(eqs, jug)[equipo]
+    row = tabla(eqs, jug).set_index("Equipo").loc[equipo]
+    partes = [f"{equipo} marcha {pos}º del grupo con {int(row.PTS)} puntos (diferencia de gol {int(row.DG):+d})."]
+    own = _pd_de(equipo, pend)
+    if own:
+        rivales = [(v if l == equipo else l) for i, l, v in own]
+        partes.append(f"Le queda{'n' if len(rivales) > 1 else ''} por jugar contra {', '.join(rivales)}.")
+    cat, manos = en_sus_manos(equipo, esc, pend)
+    partes.append(manos[0].upper() + manos[1:] + ".")
+    if cat not in ("ya", "out") and own:
+        df = esc.copy(); df["_pos"] = esc[f"Pos {equipo}"].values
+        df["_p"] = df.apply(lambda r: _res_propio(r, equipo, pend), axis=1)
+        frases = []
+        for prop, g in sorted(df.groupby("_p"), key=lambda kv: kv[1]["_pos"].mean()):
+            pmin, pmax = int(g["_pos"].min()), int(g["_pos"].max())
+            if pmax <= d:               res = "se mete entre los que clasifican directo, sin depender de nadie"
+            elif pmin <= d:             res = "puede entrar directo, aunque depende del otro resultado y de la diferencia de gol"
+            elif hay3 and pmax <= 3:    res = "termina tercero y queda a la espera de ser uno de los mejores terceros del torneo"
+            elif hay3 and pmin <= 3:    res = "puede salvarse como tercero o quedar afuera, según los otros grupos"
+            else:                       res = "queda eliminado"
+            frases.append(f"si {prop}, {res}")
+        partes.append("De cara al cierre: " + "; ".join(frases) + ".")
+    return " ".join(partes)
+
+def relato_grupo_texto(eqs, jug, esc, pend):
+    t = tabla(eqs, jug)
+    lider = t.iloc[0]
+    partes = [f"{lider.Equipo} encabeza el grupo con {int(lider.PTS)} puntos."]
+    clasif, elim, vivos = [], [], []
+    for e in eqs:
+        s = situacion(e, esc)
+        (clasif if s["ya_directo"] else elim if s["eliminado"] else vivos).append(e)
+    if clasif: partes.append(("Ya tiene el pasaje asegurado " if len(clasif) == 1 else "Ya tienen el pasaje asegurado ") + ", ".join(clasif) + ".")
+    if elim:   partes.append(("Quedó sin chances " if len(elim) == 1 else "Quedaron sin chances ") + ", ".join(elim) + ".")
+    if vivos:  partes.append(("Sigue con vida " if len(vivos) == 1 else "Siguen con vida ") + ", ".join(vivos) + ".")
+    manos = [e for e in eqs if en_sus_manos(e, esc, pend)[0] == "manos"]
+    if manos:  partes.append(("Depende de sí mismo " if len(manos) == 1 else "Dependen de sí mismos ") + ", ".join(manos) + ".")
+    if pend:   partes.append("Todo se define en: " + ", ".join(f"{l} vs {v}" for l, v in pend) + ".")
+    return " ".join(partes)
+
+def _celda_estado(g2, d, hay3):
+    pmin, pmax = int(g2["_pos"].min()), int(g2["_pos"].max())
+    rng = f"{pmin}º" if pmin == pmax else f"{pmin}º-{pmax}º"
+    if pmax <= d:            return ("#1b5e20", f"{rng} ✓")
+    if pmin <= d:            return ("#ef6c00", "DG")
+    if hay3 and pmax <= 3:   return ("#f9a825", "3º*")
+    if hay3 and pmin <= 3:   return ("#ef6c00", "3º/✗")
+    return ("#b71c1c", "✗")
+
+def matriz_necesita_html(equipo, esc, pend):
+    """Grilla coloreada: filas = resultado propio, columnas = el/los otros partidos."""
+    if len(_pd_de(equipo, pend)) != 1:
+        return None
+    d = DIRECTO(); hay3 = MEJORES_TERCEROS() > 0
+    df = esc.copy(); df["_pos"] = esc[f"Pos {equipo}"].values
+    df["_p"] = df.apply(lambda r: _res_propio(r, equipo, pend), axis=1)
+    df["_o"] = df.apply(lambda r: _res_otros(r, equipo, pend), axis=1)
+    filas = [k for k, _ in sorted(df.groupby("_p"), key=lambda kv: kv[1]["_pos"].mean())]
+    cols = [k for k, _ in sorted(df.groupby("_o"), key=lambda kv: kv[1]["_pos"].mean())]
+    th = "padding:8px 10px;font:600 13px Barlow,sans-serif;color:#1a1a2e;border:1px solid #e0e0e0;background:#f4f6ef;text-align:center"
+    h = ['<div style="overflow-x:auto"><table style="border-collapse:collapse;margin:6px 0">']
+    h.append(f'<tr><th style="{th};text-align:left">{equipo} ⬇ &nbsp;/&nbsp; otros ➡</th>'
+             + "".join(f'<th style="{th}">{c}</th>' for c in cols) + "</tr>")
+    for fp in filas:
+        h.append(f'<tr><th style="{th};text-align:left">{fp}</th>')
+        for c in cols:
+            g2 = df[(df["_p"] == fp) & (df["_o"] == c)]
+            if len(g2) == 0:
+                h.append(f'<td style="{th}">—</td>'); continue
+            color, label = _celda_estado(g2, d, hay3)
+            h.append(f'<td style="padding:12px 10px;border:1px solid #e0e0e0;text-align:center;'
+                     f'background:{color};color:#fff;font:700 15px Barlow,sans-serif">{label}</td>')
+        h.append("</tr>")
+    h.append("</table></div>")
+    chip = "color:#fff;padding:1px 7px;border-radius:3px;font:600 12px Barlow,sans-serif"
+    leyenda = (f'<div style="margin-top:6px;line-height:2">'
+               f'<span style="background:#1b5e20;{chip}">2º ✓</span> clasifica directo &nbsp; '
+               f'<span style="background:#ef6c00;{chip}">DG</span> según diferencia de gol &nbsp; '
+               f'<span style="background:#f9a825;{chip}">3º*</span> 3º (depende de otros grupos) &nbsp; '
+               f'<span style="background:#b71c1c;{chip}">✗</span> afuera</div>')
+    return "".join(h) + leyenda
+
 def panorama(equipos, jugados, esc, directo=None):
     d = DIRECTO() if directo is None else directo; hay3 = MEJORES_TERCEROS() > 0
     filas = []
@@ -650,17 +781,22 @@ def _grp(lbl): return re.split(r"[ _]", str(lbl).strip())[-1].upper() if lbl els
 def _nom(t):   return (t.get("shortName") or t.get("name") or t.get("tla") or "¿?").strip()
 
 def matches_a_texto(matches):
-    grupos = {}
+    grupos = {}; liga = []
     for m in matches:
-        if "GROUP" not in str(m.get("stage", "")).upper() and not m.get("group"): continue
-        g = _grp(m.get("group")); loc, vis = _nom(m["homeTeam"]), _nom(m["awayTeam"])
+        loc, vis = _nom(m["homeTeam"]), _nom(m["awayTeam"])
         ft = (m.get("score") or {}).get("fullTime") or {}; gl, gv = ft.get("home"), ft.get("away")
-        if m.get("status") in _FIN and gl is not None and gv is not None:
-            grupos.setdefault(g, []).append(f"{loc} {gl}-{gv} {vis}")
-        else:
-            grupos.setdefault(g, []).append(f"{loc} vs {vis}")
+        jugado = m.get("status") in _FIN and gl is not None and gv is not None
+        linea = f"{loc} {gl}-{gv} {vis}" if jugado else f"{loc} vs {vis}"
+        if "GROUP" in str(m.get("stage", "")).upper() or m.get("group"):
+            grupos.setdefault(_grp(m.get("group")), []).append(linea)
+        elif str(m.get("stage", "")).upper() == "REGULAR_SEASON":
+            liga.append(linea)
     out = []
-    for g in sorted(grupos): out.append(f"Grupo {g}"); out.extend(grupos[g]); out.append("")
+    if grupos:
+        for g in sorted(grupos):
+            out += [f"Grupo {g}", *grupos[g], ""]
+    elif liga:
+        out += liga  # liga entera: una sola tabla, sin encabezado de grupo
     return "\n".join(out).strip()
 
 def traer_de_api(token, comp="WC"):
@@ -701,9 +837,15 @@ def listar_competiciones(token):
 # ─── HELPER: cargar estado ────────────────────────────────────────────────────────
 def cargar_estado(equipos, jugados, pendientes):
     mg = elegir_max_goles(len(pendientes))
-    with st.spinner(f"Calculando {(mg+1)**(2*len(pendientes)):,} escenarios…"):
+    total = (mg+1)**(2*len(pendientes))
+    if total > 200000:   # demasiados partidos (liga): no se puede enumerar, vamos por puntos
+        st.session_state.ESTADO = dict(equipos=equipos, jugados=jugados, pendientes=pendientes,
+                                       esc=None, mg=mg, solo_puntos=True)
+        return
+    with st.spinner(f"Calculando {total:,} escenarios…"):
         esc = todos_los_escenarios(equipos, jugados, pendientes, mg)
-    st.session_state.ESTADO = dict(equipos=equipos, jugados=jugados, pendientes=pendientes, esc=esc, mg=mg)
+    st.session_state.ESTADO = dict(equipos=equipos, jugados=jugados, pendientes=pendientes,
+                                   esc=esc, mg=mg, solo_puntos=False)
     return esc
 
 # ═══════════════════════════════════════════════════════════════════════════════════
@@ -756,7 +898,10 @@ with st.sidebar:
         token = st.text_input("API Key", value=_secret("FOOTBALL_DATA_TOKEN", ""), type="password",
                                placeholder="Tu token de football-data.org",
                                help="Cargala una vez en Secrets (FOOTBALL_DATA_TOKEN) y queda precargada.")
-        comp  = st.text_input("Código torneo", value="WC", help="WC = Mundial, CL = Champions, etc.")
+        comp  = st.text_input("Código torneo", value="WC",
+                              help="Ej.: WC=Mundial, CL=Champions, PL=Premier, PD=LaLiga, SA=Serie A, "
+                                   "BL1=Bundesliga, FL1=Ligue 1, BSA=Brasileirão, PPL=Portugal, "
+                                   "DED=Eredivisie, ELC=Championship. Tocá «Ver torneos» para ver los tuyos.")
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🌐 Traer datos", use_container_width=True):
@@ -807,8 +952,12 @@ with st.sidebar:
     if st.session_state.ESTADO:
         E = st.session_state.ESTADO
         st.divider()
-        st.success(f"Grupo cargado · {len(E['equipos'])} equipos · {len(E['esc']):,} escenarios")
-        st.caption(f"Máx goles/equipo: {E['mg']} · Pendientes: {len(E['pendientes'])}")
+        if E.get("esc") is None:
+            st.success(f"Liga cargada · {len(E['equipos'])} equipos · modo por puntos")
+            st.caption(f"Pendientes: {len(E['pendientes'])} — son demasiados para enumerar marcador por marcador, así que voy por puntos.")
+        else:
+            st.success(f"Grupo cargado · {len(E['equipos'])} equipos · {len(E['esc']):,} escenarios")
+            st.caption(f"Máx goles/equipo: {E['mg']} · Pendientes: {len(E['pendientes'])}")
 
 # ─── MAIN TABS ───────────────────────────────────────────────────────────────────
 if not st.session_state.ESTADO:
@@ -889,11 +1038,22 @@ AYUDA_MD = """**¿Qué puedo responder?** Por ejemplo:
 - **¿Qué necesita España?** — qué tiene que pasar para clasificar (y si puede, para ser campeón / mejor tercero).
 - **¿Qué le conviene a Uruguay?** — qué resultado propio le sirve y qué hinchar en los otros partidos.
 - **¿En qué grupo está Brasil?** · **Equipos del grupo C** · **¿Qué grupos hay?**
+- **¿De quién depende?** (si cada equipo depende de sí mismo o necesita ayuda) · **Si terminara hoy** (quién pasa con la tabla actual)
 - **¿Puede ser campeón Cabo Verde?** · **¿Qué necesita Arabia para no descender?**
 - **Tabla** · **Panorama** · **Probabilidades** · **Número mágico de España** · **Asegurados**
 
+Podés encadenar sin repetir el equipo: *«¿qué necesita Uruguay?»* y después *«¿y qué le conviene?»*.
 Si preguntás por un equipo de otro grupo, **cambio solo** a ese grupo. Y si a un equipo le quedan
 varios partidos, te respondo por **puntos** (con cuántos clasifica)."""
+
+AYUDA_LIGA = """Esto es una **liga** (muchas fechas): el detalle gol por gol no se puede calcular, así que trabajo **por puntos**:
+
+- **Tabla** · **Si terminara hoy** (quién entra a cada zona con la tabla actual)
+- **Número mágico de River** · **¿Qué necesita River?** (cuántos puntos para asegurar)
+- **Máximos** (techo de cada uno) · **Asegurados** (quién está adentro / sin chances)
+- **Probabilidades** (estimadas por simulación)
+
+Ajustá cuántos entran a cada zona en el panel lateral (**Clasifican directos**)."""
 
 BIENVENIDA = ("👋 Soy la **calculadora de escenarios**. Preguntame en lenguaje natural: "
               "*«¿qué necesita España?»*, *«¿en qué grupo está Brasil?»*, *«equipos del grupo C»*, "
@@ -912,6 +1072,32 @@ def ejecutar_accion(acc):
     if equipo and equipo not in eqs:
         equipo = detectar_equipo(equipo, eqs)
 
+    # ── MODO LIGA (por puntos): cuando hay demasiados partidos para enumerar ──
+    if esc is None:
+        if intent == "ayuda":
+            return [("md", AYUDA_LIGA)]
+        if intent == "tabla":
+            return [("df", tabla(eqs, jug), "Tabla actual"), ("md", si_terminara_hoy_texto(eqs, jug, pen))]
+        if intent in ("hoy", "panorama"):
+            return [("md", si_terminara_hoy_texto(eqs, jug, pen)), ("df", tabla(eqs, jug), "Tabla actual")]
+        if intent == "maximos":
+            return [("df", maximos_minimos(eqs, jug, pen), "Puntos máximos posibles")]
+        if intent == "asegurados":
+            nn = n or DIRECTO()
+            return [("df", clasificado_eliminado(eqs, jug, pen, nn), f"Asegurados / sin chances (top {nn})")]
+        if intent == "probabilidades":
+            return [("md", "Estimación por simulación (Poisson, 8.000 sorteos)."),
+                    ("df", probabilidades(eqs, jug, pen), "Probabilidades")]
+        if intent in ("necesita", "numero_magico", "depende", "conviene", "visual", "puesto_exacto"):
+            if not equipo:
+                return [("warning", "Decime el equipo. Ej.: «número mágico de River» o «qué necesita River».")]
+            nn = 1 if objetivo == "campeon" else (n or DIRECTO())
+            return [("md", numero_magico_texto(equipo, eqs, jug, pen, nn)),
+                    ("df", maximos_minimos(eqs, jug, pen), "Puntos máximos posibles")]
+        return [("info", "Es una **liga** con muchas fechas, así que trabajo por puntos. Probá: "
+                         "**tabla**, **si terminara hoy**, **número mágico de X**, **máximos**, "
+                         "**asegurados** o **probabilidades**.")]
+
     if intent == "ayuda":
         return [("md", AYUDA_MD)]
     if intent == "tabla":
@@ -925,6 +1111,33 @@ def ejecutar_accion(acc):
                 ("df", probabilidades(eqs, jug, pen), "Probabilidades")]
     if intent == "maximos":
         return [("df", maximos_minimos(eqs, jug, pen), "Puntos máximos posibles")]
+    if intent == "hoy":
+        return [("md", si_terminara_hoy_texto(eqs, jug, pen)),
+                ("df", tabla(eqs, jug), "Tabla actual")]
+    if intent == "depende":
+        if equipo:
+            cat, msg = en_sus_manos(equipo, esc, pen)
+            icon = {"manos": "🟢", "ayuda": "🟡", "ya": "✅", "out": "🔴"}.get(cat, "•")
+            return [("md", f"### ¿De qué depende {equipo}?"), ("md", f"{icon} **{equipo}** — {msg}"),
+                    ("df", tabla(eqs, jug), "Tabla actual")]
+        return [("md", en_sus_manos_texto(eqs, jug, esc, pen)),
+                ("df", tabla(eqs, jug), "Tabla actual")]
+    if intent == "relato":
+        if equipo:
+            return [("md", f"### {equipo} · el escenario"),
+                    ("md", relato_equipo_texto(equipo, eqs, jug, esc, pen))]
+        return [("md", "### El grupo · el escenario"),
+                ("md", relato_grupo_texto(eqs, jug, esc, pen))]
+    if intent == "visual":
+        if not equipo:
+            return [("warning", "¿De qué equipo querés la grilla? Probá «grilla de España».")]
+        html = matriz_necesita_html(equipo, esc, pen)
+        if not html:
+            return [("info", f"A {equipo} le queda más de un partido, así que la grilla sería enorme. Va el detalle en texto:"),
+                    ("md", que_necesita_completo_texto(equipo, esc, pen))]
+        return [("md", f"### Qué necesita {equipo} · grilla de escenarios"),
+                ("html", html),
+                ("md", f"_Filas = resultado de {equipo}; columnas = el otro partido del grupo._")]
     if intent == "asegurados":
         nn = n or DIRECTO()
         return [("df", clasificado_eliminado(eqs, jug, pen, nn), f"Asegurados / sin chances (top {nn})")]
@@ -991,10 +1204,11 @@ def ejecutar_accion(acc):
                     f"«3º · depende de otros grupos»: quedar tercero clasifica solo si {equipo} entra "
                     f"entre los {MEJORES_TERCEROS()} mejores terceros del torneo (se compara con los terceros "
                     f"de los otros grupos). {equipo} termina 3º en {n3}/{T} escenarios."))
+                # El árbol ya muestra cuándo puede salir 1º (rango «1º-2º»), así que no repetimos el bloque de campeón.
             else:
                 blocks.append(("md", que_necesita_texto(equipo, esc, pen, obj, n=nn)))
-            if es_default and s["puede_1"] and not s["ya_1"]:
-                blocks += [("md", "---"), ("md", que_necesita_texto(equipo, esc, pen, "campeon"))]
+                if es_default and s["puede_1"] and not s["ya_1"]:
+                    blocks += [("md", "---"), ("md", que_necesita_texto(equipo, esc, pen, "campeon"))]
     blocks.append(("df", tabla(eqs, jug), "Tabla actual (para ubicarse)"))
     return blocks
 
@@ -1053,6 +1267,10 @@ def _parse_kw(q):
 
     if has("ayuda", "help", "que puedo", "como funciona"):
         return {"intent": "ayuda"}
+    if has("relato", "contame", "para la nota", "escribime", "escribi ", "narra", "narrá", "parrafo", "párrafo", "escenario escrito", "resumen escrito", "resumime", "redacta"):
+        return {"intent": "relato", "equipo": team}
+    if has("visual", "grilla", "matriz", "cuadro de escenarios", "mapa de escenarios", "tabla de escenarios", "grafic", "placa"):
+        return {"intent": "visual", "equipo": team}
     # navegación de grupos
     if has("en que grupo", "en cual grupo", "donde juega", "donde esta", "de que grupo", "grupo de", "que grupo es"):
         return {"intent": "buscar_equipo", "equipo": q}
@@ -1061,6 +1279,10 @@ def _parse_kw(q):
     if mg and has("grupo"):
         return {"intent": "ver_grupo", "grupo": mg.group(1)}
 
+    if has("termina hoy", "terminara hoy", "si terminara", "quedaria hoy", "como quedaria", "quien pasa hoy", "clasifica hoy", "tabla de hoy", "fase hoy"):
+        return {"intent": "hoy"}
+    if has("de quien depende", "depende de si", "en sus manos", "depende de el mismo", "depende de ella", "lo tiene en sus manos", "quien depende"):
+        return {"intent": "depende", "equipo": team}
     if has("tabla", "posicion") and not has("conviene", "necesita"):
         return {"intent": "tabla"}
     if has("panorama", "pantallazo", "como esta el grupo", "como viene") or (has("resumen") and not team):
@@ -1099,7 +1321,7 @@ def _llm_parse(q):
         "Sos un router de intención para una calculadora de escenarios de fútbol.\n" + contexto + "\n\n"
         "Respondé EXCLUSIVAMENTE un objeto JSON (sin texto extra, sin ```), con estas claves:\n"
         '- "intent": uno de [necesita, conviene, tabla, panorama, probabilidades, numero_magico, '
-        'asegurados, maximos, puesto_exacto, buscar_equipo, ver_grupo, listar_grupos, ayuda]\n'
+        'asegurados, maximos, puesto_exacto, buscar_equipo, ver_grupo, listar_grupos, depende, hoy, relato, visual, ayuda]\n'
         '- "equipo": nombre EXACTO de un equipo (de cualquier grupo) o null\n'
         '- "grupo": letra del grupo (para ver_grupo) o null\n'
         '- "objetivo": solo si intent=necesita: [clasificar, campeon, champions, descenso, tercero]; default clasificar\n'
@@ -1107,6 +1329,9 @@ def _llm_parse(q):
         '- "intro": una frase breve en español rioplatense que presente la respuesta, SIN dar números ni resultados.\n'
         "Pistas: 'en qué grupo está X'/'dónde juega X' => buscar_equipo (equipo=X). "
         "'equipos del grupo C'/'grupo C' => ver_grupo (grupo='C'). 'qué grupos hay' => listar_grupos. "
+        "'de quién depende X'/'lo tiene en sus manos' => depende. 'si terminara hoy'/'quién pasa hoy' => hoy. "
+        "'contame/escribime/relato/para la nota' => relato (equipo si lo nombran, si no el grupo). "
+        "'grilla/visual/matriz/cuadro de escenarios' => visual (equipo). "
         "'campeón'/'ganar el grupo' => objetivo campeon. 'no descender' => descenso."
     )
     body = {"model": st.session_state.LLM_MODEL, "max_tokens": 400,
@@ -1147,7 +1372,7 @@ def responder(q):
 
     # Cambio automático de grupo si el equipo no está en el grupo cargado
     cur = st.session_state.ESTADO["equipos"]
-    team_intents = {"necesita", "conviene", "numero_magico", "puesto_exacto"}
+    team_intents = {"necesita", "conviene", "numero_magico", "puesto_exacto", "visual"}
     ya = acc.get("equipo") and detectar_equipo(acc["equipo"], cur)
     if intent in team_intents and not ya:
         lab, team, datos = _buscar_grupo_de(acc.get("equipo") or q)
@@ -1155,6 +1380,12 @@ def responder(q):
             cargar_estado(*datos)
             acc["equipo"] = team
             pre = pre + [("info", f"Cambié al Grupo {lab}, donde juega {team}.")]
+        elif st.session_state.get("ultimo_equipo") and not acc.get("equipo"):
+            acc["equipo"] = st.session_state["ultimo_equipo"]  # seguir hablando del último equipo
+
+    # Memoria de contexto: recordar el último equipo mencionado
+    if acc.get("equipo"):
+        st.session_state["ultimo_equipo"] = acc["equipo"]
 
     return pre + ejecutar_accion(acc)
 
@@ -1168,6 +1399,8 @@ def render_blocks(blocks):
             st.dataframe(b[1], use_container_width=True, hide_index=True)
             if len(b) > 2 and b[2]:
                 st.caption(b[2])
+        elif kind == "html":
+            st.markdown(b[1], unsafe_allow_html=True)
         elif kind == "info":
             st.info(b[1])
         elif kind == "success":
@@ -1216,8 +1449,8 @@ for msg in st.session_state.chat:
         render_blocks(msg["blocks"])
 
 st.caption("Sugerencias rápidas:")
-sug = [f"¿Qué necesita {equipos[0]}?", "¿Qué grupos hay?", "Tabla",
-       f"¿Qué le conviene a {equipos[1]}?", "Probabilidades", "Ayuda"]
+sug = [f"¿Qué necesita {equipos[0]}?", "¿De quién depende?", "Si terminara hoy",
+       f"¿Qué le conviene a {equipos[1]}?", "¿Qué grupos hay?", "Ayuda"]
 clic = None
 for c, s in zip(st.columns(len(sug)), sug):
     if c.button(s, use_container_width=True, key=f"sug_{s}"):
