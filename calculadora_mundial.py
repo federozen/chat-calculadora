@@ -417,8 +417,11 @@ def zona_de(pos, zonas):
     return "—", _C_NEU
 
 def tabla_zonas_texto(eqs, jug, zonas):
-    t = tabla(eqs, jug); L = ["**Si terminara hoy (por zonas):**"]; cur = object()
-    for _, r in t.iterrows():
+    return tabla_zonas_texto_df(tabla(eqs, jug), zonas)
+
+def tabla_zonas_texto_df(orden, zonas):
+    L = ["**Si terminara hoy (por zonas):**"]; cur = object()
+    for _, r in orden.iterrows():
         p = int(r["Pos"]); nombre, _ = zona_de(p, zonas)
         if nombre != cur:
             L.append(f"\n__{nombre}__"); cur = nombre
@@ -426,10 +429,13 @@ def tabla_zonas_texto(eqs, jug, zonas):
     return "\n\n".join(L)
 
 def spec_zonas(eqs, jug, zonas):
+    return spec_zonas_df(tabla(eqs, jug), zonas)
+
+def spec_zonas_df(orden, zonas):
     if not zonas:
         return None
-    t = tabla(eqs, jug); rows, cells, seen = [], [], []
-    for _, r in t.iterrows():
+    rows, cells, seen = [], [], []
+    for _, r in orden.iterrows():
         p = int(r["Pos"]); nombre, color = zona_de(p, zonas)
         rows.append(f"{p}º {r['Equipo']}")
         cells.append([(f"{int(r['PTS'])}", color), (f"{int(r['DG']):+d}", color), (nombre, color)])
@@ -438,6 +444,153 @@ def spec_zonas(eqs, jug, zonas):
     return {"titulo": "Tabla por zonas (hoy)", "col_headers": ["Pts", "DG", "Zona"],
             "row_headers": rows, "cells": cells, "corner": "", "leyenda": seen,
             "footer": "Coloreado por zona según la posición actual."}
+
+# ─── MODO LIGA POR TABLA (pegás tabla + «faltan N fechas», sin resultados) ──────
+def parse_tabla_fixture(text):
+    base, pend, gleft = {}, [], None
+    for raw in str(text).splitlines():
+        ln = raw.strip()
+        if not ln:
+            continue
+        low = _zlow(ln)
+        mf = re.search(r"(\d+)\s*(fecha|fechas|jornada|jornadas)", low)
+        if mf and any(w in low for w in ("faltan", "restan", "quedan", "fecha")):
+            gleft = int(mf.group(1)); continue
+        if not re.search(r"\d", ln) and re.search(r"\s+(?:vs?|x|-|–|—)\s+", ln, flags=re.I):
+            p = re.split(r"\s+(?:vs?|x|-|–|—)\s+", ln, flags=re.I)
+            if len(p) == 2:
+                pend.append((p[0].strip(), p[1].strip())); continue
+        ln2 = re.sub(r"^\s*\d+[\.\)]?\s+(?=\D)", "", ln)  # saca posición inicial
+        if any(sep in ln2 for sep in (",", ";", "\t")):
+            f = [x.strip() for x in re.split(r"[;,\t]", ln2) if x.strip()]
+            name = f[0]; nums = [x for x in f[1:] if re.match(r"^[+-]?\d+$", x)]
+        else:
+            mnum = re.search(r"[+-]?\d", ln2)
+            if not mnum:
+                continue
+            name = ln2[:mnum.start()].strip()
+            nums = re.findall(r"[+-]?\d+", ln2[mnum.start():])
+        if not name or len(nums) < 1:
+            continue
+        pts = int(nums[0]); pj = int(nums[1]) if len(nums) > 1 else 0
+        dg = int(nums[2]) if len(nums) > 2 else 0
+        base[name] = {"pts": pts, "pj": pj, "dg": dg, "gf": max(dg, 0), "ga": max(-dg, 0)}
+    return base, pend, gleft
+
+def liga_restantes(equipos, pend, gleft):
+    if pend:
+        r = {e: 0 for e in equipos}
+        for l, v in pend:
+            if l in r: r[l] += 1
+            if v in r: r[v] += 1
+        return r
+    return {e: (gleft or 0) for e in equipos}
+
+def liga_tabla_df(base):
+    rows = sorted(base.items(), key=lambda kv: (-kv[1]["pts"], -kv[1].get("dg", 0), -kv[1].get("gf", 0)))
+    return pd.DataFrame([{"Pos": i, "Equipo": e, "PJ": d.get("pj", 0), "PTS": d["pts"], "DG": d.get("dg", 0)}
+                         for i, (e, d) in enumerate(rows, 1)])
+
+def liga_maxmin_df(base, rest):
+    rows = [{"Equipo": e, "PJ": d.get("pj", 0), "PTS": d["pts"], "Restan": rest.get(e, 0),
+             "PTS máx": d["pts"] + 3 * rest.get(e, 0)} for e, d in base.items()]
+    return pd.DataFrame(rows).sort_values(["PTS", "PTS máx"], ascending=False).reset_index(drop=True)
+
+def liga_aseg_df(base, rest, n):
+    pts = {e: base[e]["pts"] for e in base}; pmax = {e: pts[e] + 3 * rest.get(e, 0) for e in base}
+    rows = []
+    for e in base:
+        arriba = sum(1 for x in base if x != e and pmax[x] > pts[e])
+        inalc = sum(1 for x in base if x != e and pts[x] > pmax[e])
+        estado = "🟢 asegurado" if arriba < n else ("🔴 sin chances" if inalc >= n else "🟡 depende")
+        rows.append({"Equipo": e, "PTS": pts[e], "PTS máx": pmax[e], f"Top {n}": estado})
+    return pd.DataFrame(rows).sort_values("PTS", ascending=False).reset_index(drop=True)
+
+def zona_target(zonas, texto):
+    """Devuelve (k_puesto, nombre) para «entrar a X» o «no descender»."""
+    if not zonas:
+        return None
+    t = _zlow(texto)
+    if any(w in t for w in ("no desc", "no baj", "salv", "permanec", "mantener la categoria", "no se va")):
+        rele = [i for i, (h, n, c) in enumerate(zonas) if c == "#b71c1c"]
+        if rele:
+            idx = rele[0]
+            k = zonas[idx - 1][0] if idx > 0 else zonas[idx][0] - 1
+            return max(1, k), "no descender"
+    for h, n, c in zonas:
+        if _zlow(n) and _zlow(n) in t:
+            return h, n
+    return None
+
+def _liga_in_out(equipo, base, rest, k):
+    pts = {e: base[e]["pts"] for e in base}; pmax = {e: pts[e] + 3 * rest.get(e, 0) for e in base}
+    arriba = sum(1 for x in base if x != equipo and pmax[x] > pts[equipo])
+    inalc = sum(1 for x in base if x != equipo and pts[x] > pmax[equipo])
+    if arriba < k: return "in"
+    if inalc >= k: return "out"
+    return "pelea"
+
+def liga_duelos_texto(base, rest, pend, zonas):
+    if not pend:
+        return ("Para los cruces entre rivales directos necesito el **fixture** (los partidos que faltan), no solo «faltan N fechas». "
+                "Pegalos como «River vs Boca», uno por línea, y te marco los mano a mano por cada zona.")
+    if not zonas:
+        return "Configurá las zonas en «🎨 Zonas con nombre» (panel) y te detecto los cruces entre rivales directos."
+    L = ["**Cruces entre rivales directos** (partidos que faltan entre dos que pelean la misma zona):"]; any_ = False
+    for h, nombre, c in zonas:
+        pelea = {e for e in base if _liga_in_out(e, base, rest, h) == "pelea"}
+        duelos = [(a, b) for (a, b) in pend if a in pelea and b in pelea]
+        if duelos:
+            any_ = True; L.append(f"\n__{nombre}__")
+            for a, b in duelos:
+                L.append(f"• {a} vs {b}")
+    if not any_:
+        return "No encontré cruces directos entre equipos que peleen la misma zona en el fixture cargado."
+    L.append("\n_Estos son los partidos donde un rival le saca puntos directos al otro: valen doble en la pelea._")
+    return "\n\n".join(L)
+
+def liga_que_necesita_texto(equipo, base, rest, zonas, texto, pend=None):
+    pts = {e: base[e]["pts"] for e in base}; pmax = {e: pts[e] + 3 * rest.get(e, 0) for e in base}
+    orden = liga_tabla_df(base); pos = int(orden.set_index("Equipo").loc[equipo, "Pos"])
+    tgt = zona_target(zonas, texto)
+    if not tgt:
+        nombres = ", ".join(n for _, n, _ in zonas) if zonas else "—"
+        return f"¿Para qué zona? Configurá las zonas en el panel y preguntá, por ej., «qué necesita {equipo} para Libertadores». Zonas activas: {nombres}."
+    k, nombre = tgt
+    gx = rest.get(equipo, 0); meta = "no descender" if nombre == "no descender" else f"entrar a {nombre}"
+    arriba = sum(1 for x in base if x != equipo and pmax[x] > pts[equipo])
+    inalc = sum(1 for x in base if x != equipo and pts[x] > pmax[equipo])
+    otros = sorted((pmax[x] for x in base if x != equipo), reverse=True)
+    L = [f"**¿Qué necesita {equipo} para {meta}?**",
+         f"Está {pos}º con **{pts[equipo]} pts** y le quedan {gx} partidos ({3*gx} en juego)."]
+    if arriba < k:
+        L.append(f"✅ Ya está adentro de **{nombre}** pase lo que pase.")
+    elif inalc >= k:
+        L.append(f"❌ Ya no puede entrar a **{nombre}** (matemáticamente quedó afuera).")
+    else:
+        necesita = max(0, (otros[k-1] + 1) - pts[equipo]) if len(otros) >= k else 0
+        if necesita == 0:
+            L.append(f"✅ Ya está asegurado en **{nombre}**.")
+        elif necesita <= 3 * gx:
+            gan = -(-necesita // 3)
+            L.append(f"Necesita sumar **{necesita} pts** más (de {3*gx} en juego) para asegurarse — le alcanza con ganar {gan} de los {gx}.")
+        else:
+            L.append(f"No le alcanza por sí solo: necesitaría {necesita} pts y solo hay {3*gx} en juego → "
+                     f"tiene que ganar lo suyo **y** que los rivales pinchen.")
+    if pend:
+        mios = [(a, b) for (a, b) in pend if equipo in (a, b)]
+        if mios:
+            rivs = [b if a == equipo else a for (a, b) in mios]
+            L.append("Le queda(n) por jugar: " + ", ".join(rivs) + ".")
+            directos = [r for r in rivs if r in base and _liga_in_out(r, base, rest, k) == "pelea"]
+            if directos:
+                L.append(f"⚔️ **Mano a mano:** se cruza con {', '.join(directos)}, rival(es) directo(s) por {nombre} — "
+                         f"ganarles vale doble (suma y los deja sin sumar).")
+        L.append("_El «ya está / quedó afuera» es exacto. Los puntos a sumar son un piso seguro (asume que el resto gana todo lo suyo); "
+                 "los cruces directos de arriba ajustan eso a favor._")
+    else:
+        L.append("_Cuenta por puntos asumiendo que los rivales ganan todo lo suyo (piso seguro). Pegá el **fixture** para ver tus cruces directos._")
+    return "\n\n".join(L)
 
 def relato_equipo_texto(equipo, eqs, jug, esc, pend):
     d = DIRECTO(); hay3 = MEJORES_TERCEROS() > 0
@@ -450,6 +603,11 @@ def relato_equipo_texto(equipo, eqs, jug, esc, pend):
         partes.append(f"Le queda{'n' if len(rivales) > 1 else ''} por jugar contra {', '.join(rivales)}.")
     cat, manos = en_sus_manos(equipo, esc, pend)
     partes.append(manos[0].upper() + manos[1:] + ".")
+    pmin, pmax = int(esc[f"Pos {equipo}"].min()), int(esc[f"Pos {equipo}"].max())
+    if pmin != pmax:
+        partes.append(f"En el mejor de los casos puede terminar {pmin}º y en el peor, {pmax}º.")
+    if not situacion(equipo, esc)["ya_1"] and situacion(equipo, esc)["puede_1"] and pmin == 1:
+        partes.append("Todavía tiene chances de quedarse con el primer puesto del grupo.")
     if cat not in ("ya", "out") and own:
         df = esc.copy(); df["_pos"] = esc[f"Pos {equipo}"].values
         df["_p"] = df.apply(lambda r: _res_propio(r, equipo, pend), axis=1)
@@ -479,6 +637,16 @@ def relato_grupo_texto(eqs, jug, esc, pend):
     manos = [e for e in eqs if en_sus_manos(e, esc, pend)[0] == "manos"]
     if manos:  partes.append(("Depende de sí mismo " if len(manos) == 1 else "Dependen de sí mismos ") + ", ".join(manos) + ".")
     if pend:   partes.append("Todo se define en: " + ", ".join(f"{l} vs {v}" for l, v in pend) + ".")
+    if pend:
+        try:
+            sc = bisagra_scores(eqs, jug, pend, esc)
+            if sc and sc[0]["swing"] > 0:
+                partes.append(f"El partido que más define la clasificación es {sc[0]['match'][0]} vs {sc[0]['match'][1]}.")
+        except Exception:
+            pass
+    if len(t) >= 3:
+        margen = int(t.iloc[0]["PTS"]) - int(t.iloc[2]["PTS"])
+        partes.append(f"Hoy {t.iloc[0].Equipo} le saca {margen} punto{'s' if margen != 1 else ''} al 3º ({t.iloc[2].Equipo}).")
     return " ".join(partes)
 
 def _celda_estado(g2, d, hay3):
@@ -798,6 +966,70 @@ def barras_puesto_png(equipo, esc):
     ax.get_yaxis().set_visible(False); ax.tick_params(axis="x", labelsize=12)
     fig.text(0.01, -0.03, "% de escenarios (conteo de marcadores, no probabilidad real). Verde = clasifica.", fontsize=8, style="italic", color="#666")
     buf = BytesIO(); fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white", pad_inches=0.2); plt.close(fig)
+    return buf.getvalue()
+
+def _chances_label(pct, s):
+    if s.get("ya_directo"): return "YA CLASIFICÓ", "#1b5e20"
+    if s.get("eliminado"): return "ELIMINADO", "#b71c1c"
+    if pct >= 85: return "MUY BIEN", "#1b5e20"
+    if pct >= 60: return "BIEN ENCAMINADO", "#7aa53d"
+    if pct >= 40: return "MANO A MANO", "#f9a825"
+    if pct >= 15: return "COMPLICADO", "#ef6c00"
+    return "CASI SIN CHANCES", "#b71c1c"
+
+def chances_texto(equipo, eqs, jug, esc, pend):
+    d = DIRECTO(); hay3 = MEJORES_TERCEROS() > 0; s = situacion(equipo, esc)
+    pos = esc[f"Pos {equipo}"]; pct = 100 * float((pos <= d).mean())
+    if s["ya_directo"]: pct = 100
+    if s["eliminado"]: pct = 0
+    verdict, _ = _chances_label(pct, s)
+    icon = "✅" if s["ya_directo"] else ("🔴" if s["eliminado"] else ("🟢" if pct >= 60 else ("🟡" if pct >= 40 else "🟠")))
+    diez = max(0, min(10, round(pct / 10)))
+    L = [f"**¿Cómo viene {equipo}?**", f"{icon} **{verdict}**"]
+    if s["ya_directo"]:
+        L.append(f"{equipo} ya tiene la clasificación asegurada pase lo que pase.")
+    elif s["eliminado"]:
+        L.append(f"{equipo} ya no puede clasificar: quedó sin chances matemáticas.")
+    else:
+        L.append(f"En **{diez} de cada 10** formas en que pueden salir los partidos que faltan, {equipo} clasifica entre los {d} primeros.")
+        df = esc.copy(); df["_p"] = df.apply(lambda r: _res_propio(r, equipo, pend), axis=1); df["_ok"] = (pos <= d).values
+        rates = {p: g["_ok"].mean() for p, g in df.groupby("_p") if p}
+        gana = [p for p in rates if p.startswith("le gana")]
+        if gana and all(rates[p] >= 0.999 for p in gana):
+            L.append("Lo tiene en sus manos: **ganando** lo suyo queda adentro sin depender de nadie.")
+        else:
+            cat, manos = en_sus_manos(equipo, esc, pend)
+            L.append(manos[0].upper() + manos[1:] + ".")
+        if hay3 and s.get("puede_tercero"):
+            L.append(f"_Aun sin entrar entre los {d} primeros, puede colarse como uno de los mejores terceros._")
+    L.append("_Guía didáctica: cuenta de cuántas formas pueden salir los goles, no es una probabilidad real._")
+    return "\n\n".join(L)
+
+def placa_chances_png(equipo, eqs, jug, esc, pend):
+    import matplotlib; matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.colors import LinearSegmentedColormap
+    from io import BytesIO
+    d = DIRECTO(); s = situacion(equipo, esc); pos = esc[f"Pos {equipo}"]
+    pct = 100 * float((pos <= d).mean())
+    if s["ya_directo"]: pct = 100
+    if s["eliminado"]: pct = 0
+    verdict, _ = _chances_label(pct, s)
+    diez = max(0, min(10, round(pct / 10)))
+    fig, ax = plt.subplots(figsize=(7.2, 2.2), dpi=200)
+    cmap = LinearSegmentedColormap.from_list("c", ["#b71c1c", "#ef6c00", "#f9a825", "#7aa53d", "#1b5e20"])
+    ax.imshow(np.linspace(0, 1, 256).reshape(1, -1), extent=[0, 100, 0, 1], aspect="auto", cmap=cmap)
+    ax.plot([pct], [1.12], marker="v", markersize=18, color="#1a1a2e", clip_on=False)
+    ax.text(pct, 1.45, verdict, ha="center", va="bottom", fontsize=15, fontweight="bold", color="#1a1a2e", clip_on=False)
+    for x, lab in [(10, "Casi nada"), (30, "Difícil"), (50, "Parejo"), (70, "Probable"), (90, "Casi seguro")]:
+        ax.text(x, -0.22, lab, ha="center", va="top", fontsize=9.5, color="#444")
+    ax.set_xlim(0, 100); ax.set_ylim(-1.4, 2.3); ax.axis("off")
+    ax.set_title(f"¿Cómo viene {equipo}?", fontsize=15, fontweight="bold", color="#1a1a2e", loc="left", y=0.92)
+    sub = ("Ya clasificó" if s["ya_directo"] else ("Quedó eliminado" if s["eliminado"]
+           else f"Clasifica en {diez} de cada 10 formas posibles"))
+    ax.text(50, -0.62, sub, ha="center", va="top", fontsize=10.5, style="italic", color="#555")
+    buf = BytesIO(); fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white", pad_inches=0.3); plt.close(fig)
     return buf.getvalue()
 
 def panorama(equipos, jugados, esc, directo=None):
@@ -1247,7 +1479,7 @@ with st.sidebar:
 
     # Cargar datos
     st.subheader("📥 Cargar datos")
-    modo_carga = st.radio("Fuente", ["API football-data.org", "Pegar texto"], label_visibility="collapsed")
+    modo_carga = st.radio("Fuente", ["API football-data.org", "Pegar resultados", "Pegar tabla + fixture (ligas)"], label_visibility="collapsed")
 
     texto_torneo = ""
 
@@ -1284,6 +1516,26 @@ with st.sidebar:
                 st.caption(f"`{code}` — {name}")
         texto_torneo = st.session_state.texto_torneo_cache
 
+    elif modo_carga == "Pegar tabla + fixture (ligas)":
+        st.caption("Pegá la **tabla** (una línea por equipo: «Equipo, Pts, PJ, DG»). Abajo, lo ideal es pegar el **fixture** que viene (líneas «River vs Boca») para captar los cruces entre rivales; si no, poné «faltan N fechas» (atajo, no ve los cruces).")
+        tabla_txt = st.text_area("Tabla de posiciones", height=170,
+                                 placeholder="River Plate, 31, 14, +12\nBoca Juniors, 28, 14, +7\nRacing, 27, 14, +5\n...",
+                                 key="liga_tabla_txt")
+        fix_txt = st.text_area("Fechas que faltan (o fixture)", height=80,
+                               placeholder="faltan 5 fechas\n— o pegá los partidos: River vs Boca …",
+                               key="liga_fix_txt")
+        if st.button("✅ Cargar liga (tabla)", use_container_width=True, type="primary"):
+            base, pend, gleft = parse_tabla_fixture((tabla_txt or "") + "\n" + (fix_txt or ""))
+            if len(base) >= 3:
+                eqs = list(base.keys()); rest = liga_restantes(eqs, pend, gleft)
+                st.session_state.ESTADO = dict(modo="liga_tabla", equipos=eqs, base=base,
+                                               pendientes=pend, rest=rest, gleft=gleft,
+                                               jugados=[], esc=None, mg=0, solo_puntos=True)
+                st.rerun()
+            else:
+                st.error("No pude leer la tabla. Probá el formato «Equipo, Pts, PJ, DG» (una línea por equipo).")
+        texto_torneo = ""
+
     else:
         texto_torneo = st.text_area(
             "Pegá los resultados",
@@ -1309,7 +1561,11 @@ with st.sidebar:
     if st.session_state.ESTADO:
         E = st.session_state.ESTADO
         st.divider()
-        if E.get("esc") is None:
+        if E.get("modo") == "liga_tabla":
+            st.success(f"Liga cargada (tabla) · {len(E['equipos'])} equipos")
+            falt = E.get("gleft")
+            st.caption((f"Faltan {falt} fechas" if falt else f"{len(E['pendientes'])} partidos pendientes") + " · cuentas por puntos.")
+        elif E.get("esc") is None:
             st.success(f"Liga cargada · {len(E['equipos'])} equipos · modo por puntos")
             st.caption(f"Pendientes: {len(E['pendientes'])} — son demasiados para enumerar marcador por marcador, así que voy por puntos.")
         else:
@@ -1432,6 +1688,7 @@ AYUDA_MD = """**Todo esto funciona escribiéndolo (no hace falta el asistente Cl
 - *Comparar España y Uruguay* — cara a cara
 - *España puede salir 1º* — cuándo termina en ese puesto
 - *Mapa del grupo* — mapa de calor de en qué puesto termina cada uno
+- *¿Cómo viene España?* — explicación didáctica de sus chances, con medidor (placa)
 - *Barras de España* — distribución de en qué puesto puede terminar (gráfico)
 - *Partido bisagra* — qué partido de los que faltan define más cosas
 - *Tabla por zonas* — para ligas: pinta la tabla por Libertadores/Sudamericana/descenso (configurá las zonas en el panel)
@@ -1443,14 +1700,15 @@ AYUDA_MD = """**Todo esto funciona escribiéndolo (no hace falta el asistente Cl
 Podés encadenar sin repetir el equipo: *«¿qué necesita Uruguay?»* y después *«¿y qué le conviene?»*.
 Si preguntás por un equipo de otro grupo, **cambio solo** a ese grupo."""
 
-AYUDA_LIGA = """Esto es una **liga** (muchas fechas): el detalle gol por gol no se puede calcular, así que trabajo **por puntos**:
+AYUDA_LIGA = """Esto es una **liga** (muchas fechas): trabajo **por puntos**. Comandos:
 
-- **Tabla** · **Si terminara hoy** (quién entra a cada zona con la tabla actual)
-- **Número mágico de River** · **¿Qué necesita River?** (cuántos puntos para asegurar)
-- **Máximos** (techo de cada uno) · **Asegurados** (quién está adentro / sin chances)
-- **Probabilidades** (estimadas por simulación)
+- **Tabla por zonas** — pinta Libertadores/Sudamericana/descenso (configurá las zonas en el panel)
+- **¿Qué necesita River para Libertadores?** · **…para no descender** · **…para Sudamericana**
+- **Número mágico de River** · **Máximos** (techo de cada uno) · **Asegurados top 4**
+- **Si terminara hoy**
 
-Ajustá cuántos entran a cada zona en el panel lateral (**Clasifican directos**)."""
+Si cargaste por **tabla + fechas**, con eso me alcanza para todas estas cuentas (no necesito los resultados).
+Configurá las zonas con nombre en «🎨 Zonas con nombre» del panel."""
 
 BIENVENIDA = ("👋 Soy la **calculadora de escenarios**. Preguntame en lenguaje natural: "
               "*«¿qué necesita España?»*, *«¿en qué grupo está Brasil?»*, *«equipos del grupo C»*, "
@@ -1459,12 +1717,59 @@ BIENVENIDA = ("👋 Soy la **calculadora de escenarios**. Preguntame en lenguaje
 
 
 # ─── EJECUTOR DETERMINÍSTICO (las cuentas las hace el motor, nunca el LLM) ─────────
+def _router_liga_tabla(acc, E):
+    intent = acc.get("intent"); equipo = acc.get("equipo"); q = acc.get("q", "")
+    base, rest = E["base"], E["rest"]; eqs = E["equipos"]
+    z = st.session_state.get("ZONAS") or []
+    if equipo and equipo not in eqs:
+        equipo = detectar_equipo(equipo, eqs)
+    if intent == "ayuda":
+        return [("md", AYUDA_LIGA)]
+    if intent in ("tabla", "hoy", "panorama"):
+        out = []
+        if z:
+            out.append(_placa(spec_zonas_df(liga_tabla_df(base), z), "tabla_zonas.png"))
+            out.append(("md", tabla_zonas_texto_df(liga_tabla_df(base), z)))
+        else:
+            out.append(("df", liga_tabla_df(base), "Tabla actual"))
+        return out
+    if intent == "zonas":
+        if not z:
+            return [("info", "Configurá las zonas en «🎨 Zonas con nombre» (panel) y volvé a preguntar.")]
+        return [_placa(spec_zonas_df(liga_tabla_df(base), z), "tabla_zonas.png"),
+                ("md", tabla_zonas_texto_df(liga_tabla_df(base), z))]
+    if intent == "maximos":
+        return [("df", liga_maxmin_df(base, rest), "Puntos máximos posibles")]
+    if intent == "asegurados":
+        nn = acc.get("n") or DIRECTO()
+        return [("df", liga_aseg_df(base, rest, nn), f"Asegurados / sin chances (top {nn})")]
+    if intent in ("duelos", "cruces"):
+        return [("md", liga_duelos_texto(base, rest, E["pendientes"], z))]
+    if intent in ("necesita", "numero_magico", "puesto_exacto", "conviene", "depende"):
+        if not equipo:
+            return [("warning", "Decime el equipo. Ej.: «qué necesita River para Libertadores».")]
+        return [("md", liga_que_necesita_texto(equipo, base, rest, z, q, E["pendientes"])),
+                ("df", liga_maxmin_df(base, rest), "Puntos máximos posibles")]
+    if intent in ("chances", "relato"):
+        if not equipo:
+            return [("info", "En modo liga, contame el equipo y la zona. Ej.: «qué necesita River para Libertadores».")]
+        return [("md", liga_que_necesita_texto(equipo, base, rest, z, q or "", E["pendientes"])),
+                ("df", liga_maxmin_df(base, rest), "Puntos máximos posibles")]
+    return [("info", "Cargaste una **liga por tabla**. Probá: «tabla por zonas», «qué necesita River para Libertadores», "
+                     "«máximos», «asegurados top 4». (Para escenarios marcador-a-marcador, cargá un grupo por resultados.)")]
+
+
 def ejecutar_accion(acc):
     intent = acc.get("intent")
     equipo = acc.get("equipo")
     objetivo = acc.get("objetivo")
     n = acc.get("n")
     E = st.session_state.ESTADO
+
+    # ── MODO LIGA POR TABLA (pegaste tabla + fechas) ──
+    if E.get("modo") == "liga_tabla":
+        return _router_liga_tabla(acc, E)
+
     eqs, jug, pen, esc = E["equipos"], E["jugados"], E["pendientes"], E["esc"]
     if equipo and equipo not in eqs:
         equipo = detectar_equipo(equipo, eqs)
@@ -1567,6 +1872,11 @@ def ejecutar_accion(acc):
         if not equipo:
             return [("warning", "¿De qué equipo? Ej.: «barras de España».")]
         return [_placa_png(barras_puesto_png(equipo, esc), f"barras_{equipo}.png")]
+    if intent == "chances":
+        if not equipo:
+            return [("warning", "¿De qué equipo querés ver las chances? Ej.: «¿cómo viene España?».")]
+        return [_placa_png(placa_chances_png(equipo, eqs, jug, esc, pen), f"chances_{equipo}.png"),
+                ("md", chances_texto(equipo, eqs, jug, esc, pen))]
     if intent == "comparar":
         e2 = acc.get("equipo2")
         if not (equipo and e2):
@@ -1716,6 +2026,8 @@ def _parse_kw(q):
         return {"intent": "ayuda"}
     if has("relato", "contame", "para la nota", "escribime", "escribi ", "narra", "narrá", "parrafo", "párrafo", "escenario escrito", "resumen escrito", "resumime", "redacta"):
         return {"intent": "relato", "equipo": team}
+    if has("cruces directos", "cruce directo", "duelos directos", "duelo directo", "rivales directos", "mano a mano", "partidos entre", "seis puntos", "finales entre"):
+        return {"intent": "duelos"}
     if has("zonas", "por zona", "tabla por zona", "tabla con zona", "mostrar zonas", "ver zonas"):
         return {"intent": "zonas"}
     if has("16avos", "dieciseisavos", "cruce", "rival", "posible rival", "posibles rivales", "camino", "contra quien", "a quien enfrenta", "con quien le toca", "con quien juega"):
@@ -1724,6 +2036,8 @@ def _parse_kw(q):
         return {"intent": "camino", "equipo": tcam}
     if has("visual", "grilla", "matriz", "cuadro de escenarios", "mapa de escenarios", "tabla de escenarios", "grafic", "placa"):
         return {"intent": "visual", "equipo": team}
+    if has("como viene", "como esta", "como llega", "chances", "que chance", "esta complicado", "esta bien parado", "esta para clasificar", "esta adentro", "esta afuera", "termometro"):
+        return {"intent": "chances", "equipo": team}
     if has("bisagra", "partido clave", "partido decisivo", "partido mas importante", "que partido define", "que se define", "mas define", "partido mas decisivo"):
         return {"intent": "bisagra"}
     if has("barras", "en barras", "distribucion", "grafico de barras", "chances por puesto", "reparto por puesto"):
@@ -1788,7 +2102,7 @@ def _llm_parse(q):
         "Respondé EXCLUSIVAMENTE un objeto JSON (sin texto extra, sin ```), con estas claves:\n"
         '- "intent": uno de [necesita, conviene, tabla, panorama, probabilidades, numero_magico, '
         'asegurados, maximos, puesto_exacto, buscar_equipo, ver_grupo, listar_grupos, depende, hoy, relato, '
-        'visual, comparar, puesto, mapa, camino, bisagra, barras, zonas, ayuda]\n'
+        'visual, comparar, puesto, mapa, camino, bisagra, barras, zonas, chances, relato, duelos, ayuda]\n'
         '- "equipo": nombre EXACTO de un equipo (de cualquier grupo) o null\n'
         '- "equipo2": segundo equipo (solo para comparar) o null\n'
         '- "grupo": letra del grupo (para ver_grupo) o null\n'
@@ -1801,7 +2115,7 @@ def _llm_parse(q):
         "'contame/escribime/relato/para la nota' => relato (equipo si lo nombran, si no el grupo). "
         "'grilla/visual/matriz' => visual (equipo). 'comparar X y Z'/'X vs Z' => comparar (equipo=X, equipo2=Z). "
         "'X puede salir/terminar Nº' => puesto (equipo=X, n=N). 'mapa/mapa de calor/dónde termina cada uno' => mapa. "
-        "'rival de X'/'cruce de X en 16avos'/'camino de X'/'posibles rivales' => camino (equipo=X; si no nombran equipo y juega Argentina, equipo=Argentina). "
+        "'cómo viene X'/'qué chances tiene X'/'está para clasificar X'/'termómetro de X' => chances (equipo=X). 'contame el escenario de X'/'relato de X' => relato (equipo=X); 'relato del grupo' => relato sin equipo. 'rival de X'/'cruce de X en 16avos'/'camino de X'/'posibles rivales' => camino (equipo=X; si no nombran equipo y juega Argentina, equipo=Argentina). "
         "'campeón'/'ganar el grupo' => objetivo campeon. 'no descender' => descenso."
     )
     body = {"model": st.session_state.LLM_MODEL, "max_tokens": 400,
@@ -1837,6 +2151,7 @@ def responder(q):
     pre = [("md", f"_{intro}_")] if intro else []
     if err_note:
         pre = [err_note] + pre
+    acc["q"] = q
     intent = acc.get("intent")
 
     if intent == "listar_grupos":
@@ -1848,7 +2163,7 @@ def responder(q):
 
     # Cambio automático de grupo si el equipo no está en el grupo cargado
     cur = st.session_state.ESTADO["equipos"]
-    team_intents = {"necesita", "conviene", "numero_magico", "puesto_exacto", "visual", "puesto", "barras"}
+    team_intents = {"necesita", "conviene", "numero_magico", "puesto_exacto", "visual", "puesto", "barras", "chances"}
     ya = acc.get("equipo") and detectar_equipo(acc["equipo"], cur)
     if intent in team_intents and not ya:
         lab, team, datos = _buscar_grupo_de(acc.get("equipo") or q)
@@ -1935,12 +2250,13 @@ for _mi, msg in enumerate(st.session_state.chat):
         render_blocks(msg["blocks"], prefix=f"m{_mi}")
 
 st.caption("Sugerencias rápidas:")
-sug = [f"¿Qué necesita {equipos[0]}?", "¿De quién depende?", "Si terminara hoy",
-       f"¿Qué le conviene a {equipos[1]}?", "¿Qué grupos hay?", "Ayuda"]
+sug1 = [f"¿Cómo viene {equipos[0]}?", f"¿Qué necesita {equipos[0]}?", "¿De quién depende?", "Si terminara hoy"]
+sug2 = [f"Contame el escenario de {equipos[0]}", "Relato del grupo", "Partido bisagra", "Ayuda"]
 clic = None
-for c, s in zip(st.columns(len(sug)), sug):
-    if c.button(s, use_container_width=True, key=f"sug_{s}"):
-        clic = s
+for fila in (sug1, sug2):
+    for c, s in zip(st.columns(len(fila)), fila):
+        if c.button(s, use_container_width=True, key=f"sug_{s}"):
+            clic = s
 
 prompt = st.chat_input("Preguntá: «¿qué necesita España?», «¿en qué grupo está Brasil?», «equipos del grupo C»…")
 consulta = prompt or clic
