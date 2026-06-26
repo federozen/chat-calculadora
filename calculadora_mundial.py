@@ -629,8 +629,8 @@ def _porque_numero_magico(equipo, eqs, jug, pen, n):
 
 def _porque_chances(equipo, esc):
     d = DIRECTO(); T = len(esc); pos = esc[f"Pos {equipo}"]; n = int((pos <= d).sum())
-    return (f"de las {T} formas en que pueden salir los partidos que faltan, en {n} {equipo} queda entre los "
-            f"{d} primeros (≈{round(10*n/T)}/10). No pesa que unos marcadores sean más probables que otros.")
+    return (f"de los {T} escenarios posibles (todas las formas en que pueden salir los goles de los partidos que faltan), "
+            f"en {n} {equipo} queda entre los {d} primeros y en {T-n} no. Es un conteo de escenarios, no una probabilidad.")
 
 def _porque_bisagra(eqs, jug, pen, esc):
     sc = bisagra_scores(eqs, jug, pen, esc)
@@ -1134,6 +1134,83 @@ def previa_condicional_texto(eqs, jugados, pend, esc, fixed):
         L.append("_Falta definir: " + ", ".join(rem) + "._")
     L.append("_La tabla de arriba asume triunfos 1-0 y empates 0-0 (el DG real depende del marcador). La clasificación considera todos los marcadores posibles de los partidos que fijaste; en empates de puntos muy finos puede definirse por desempate._")
     return "\n\n".join(L)
+
+def _branch_label(equipo, own, combo):
+    parts = []
+    for i, l, v in own:
+        o = combo[i]; other = v if l == equipo else l
+        if (o == "L" and l == equipo) or (o == "V" and v == equipo):
+            parts.append(f"le gana a {other}")
+        elif o == "E":
+            parts.append(f"empata con {other}")
+        else:
+            parts.append(f"pierde con {other}")
+    return " y ".join(parts)
+
+def arbol_branches(equipo, eqs, jug, esc, pend):
+    import itertools
+    own = _pd_de(equipo, pend)
+    if not own or len(own) > 2:
+        return None
+    d = DIRECTO(); hay3 = MEJORES_TERCEROS() > 0
+    res = []
+    for vals in itertools.product(["L", "E", "V"], repeat=len(own)):
+        combo = {i: o for (i, l, v), o in zip(own, vals)}
+        m = pd.Series(True, index=esc.index)
+        for i, o in combo.items():
+            gl, gv = esc[f"P{i}_gl"], esc[f"P{i}_gv"]
+            m &= (gl > gv) if o == "L" else ((gl == gv) if o == "E" else (gl < gv))
+        sub = esc[m]
+        if len(sub) == 0:
+            continue
+        pos = sub[f"Pos {equipo}"]; rd = float((pos <= d).mean()); r3 = float((pos == 3).mean())
+        if rd >= 0.999:
+            verd, col = "Clasifica", "#1b5e20"
+        elif rd <= 0.001:
+            verd, col = ("Pelea 3º", "#f9a825") if (hay3 and r3 > 0) else ("Afuera", "#b71c1c")
+        else:
+            verd, col = "Depende", "#ef6c00"
+        # orden desde la óptica del equipo: gana(0) / empata(1) / pierde(2)
+        pkey = []
+        for i, l, v in own:
+            o = combo[i]
+            pkey.append(0 if ((o == "L" and l == equipo) or (o == "V" and v == equipo)) else (1 if o == "E" else 2))
+        res.append({"label": _branch_label(equipo, own, combo).capitalize(), "verd": verd,
+                    "col": col, "key": tuple(pkey)})
+    res.sort(key=lambda r: r["key"])
+    return res
+
+def placa_arbol_png(equipo, eqs, jug, esc, pend):
+    import matplotlib; matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import FancyBboxPatch
+    import textwrap
+    from io import BytesIO
+    br = arbol_branches(equipo, eqs, jug, esc, pend)
+    if not br:
+        return None
+    n = len(br); fig, ax = plt.subplots(figsize=(7.6, 0.92 * n + 1.1), dpi=200)
+    ax.set_xlim(0, 10); ax.set_ylim(0, n); ax.axis("off")
+    ax.set_title(f"¿Qué pasa con {equipo}?", fontsize=15, fontweight="bold", color="#1a1a2e", loc="left", pad=12)
+    ymid = n / 2
+    ax.add_patch(FancyBboxPatch((0.1, ymid - 0.42), 2.3, 0.84, boxstyle="round,pad=0.03,rounding_size=0.12",
+                                facecolor="#1a1a2e", edgecolor="none"))
+    ax.text(1.25, ymid, equipo, ha="center", va="center", color="white", fontsize=12, fontweight="bold")
+    for j, b in enumerate(br):
+        y = n - 0.5 - j
+        ax.plot([2.4, 3.4], [ymid, y], color="#bbb", lw=2, zorder=0)
+        ax.add_patch(FancyBboxPatch((3.4, y - 0.36), 3.6, 0.72, boxstyle="round,pad=0.03,rounding_size=0.1",
+                                    facecolor="#eef1e8", edgecolor="#d8ddcf"))
+        ax.text(5.2, y, "\n".join(textwrap.wrap(b["label"], 26)), ha="center", va="center", fontsize=10.5,
+                color="#1a1a2e", fontweight="bold")
+        ax.plot([7.0, 7.5], [y, y], color="#bbb", lw=2, zorder=0)
+        ax.add_patch(FancyBboxPatch((7.5, y - 0.36), 2.3, 0.72, boxstyle="round,pad=0.03,rounding_size=0.1",
+                                    facecolor=b["col"], edgecolor="none"))
+        ax.text(8.65, y, b["verd"], ha="center", va="center", color="white", fontsize=11, fontweight="bold")
+    fig.text(0.01, -0.02, "Según el resultado de su partido. «Depende» = puede clasificar o no según los otros partidos.",
+             fontsize=8, style="italic", color="#666")
+    buf = BytesIO(); fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white", pad_inches=0.25); plt.close(fig)
+    return buf.getvalue()
 
 def panorama(equipos, jugados, esc, directo=None):
     d = DIRECTO() if directo is None else directo; hay3 = MEJORES_TERCEROS() > 0
@@ -1795,6 +1872,7 @@ AYUDA_MD = """**Todo esto funciona escribiéndolo (no hace falta el asistente Cl
 - *España puede salir 1º* — cuándo termina en ese puesto
 - *Mapa del grupo* — mapa de calor de en qué puesto termina cada uno
 - *¿Cómo viene España?* — explicación didáctica de sus chances, con medidor (placa)
+- *Árbol de España* — flowchart si/entonces: gana → clasifica, empata → depende, etc. (placa)
 - *Barras de España* — distribución de en qué puesto puede terminar (gráfico)
 - *Partido bisagra* — qué partido de los que faltan define más cosas
 - *Tabla por zonas* — para ligas: pinta la tabla por Libertadores/Sudamericana/descenso (configurá las zonas en el panel)
@@ -2018,6 +2096,14 @@ def ejecutar_accion(acc):
             return [("warning", "¿De qué equipo querés ver las chances? Ej.: «¿cómo viene España?».")]
         return [_placa_png(placa_chances_png(equipo, eqs, jug, esc, pen), f"chances_{equipo}.png"),
                 ("md", chances_texto(equipo, eqs, jug, esc, pen))]
+    if intent == "arbol":
+        if not equipo:
+            return [("warning", "¿De qué equipo querés el árbol? Ej.: «árbol de España».")]
+        png = placa_arbol_png(equipo, eqs, jug, esc, pen)
+        if not png:
+            return [("info", f"{equipo} tiene demasiados partidos pendientes para un árbol claro; probá «qué necesita {equipo}».")]
+        return [_placa_png(png, f"arbol_{equipo}.png"),
+                ("md", f"Árbol de decisión de **{equipo}** según su resultado. Para el detalle escrito, pedí «qué necesita {equipo}».")]
     if intent == "simulador":
         return [("info", "Abrí el panel **🎮 Simulador: ¿qué pasa si…?** (arriba de las sugerencias). "
                          "Elegí el resultado de cada partido que falta y te muestro la tabla resultante, quién clasifica y la previa en prosa.")]
@@ -2173,6 +2259,8 @@ def _parse_kw(q):
         return {"intent": "ayuda"}
     if has("relato", "contame", "para la nota", "escribime", "escribi ", "narra", "narrá", "parrafo", "párrafo", "escenario escrito", "resumen escrito", "resumime", "redacta"):
         return {"intent": "relato", "equipo": team}
+    if has("arbol", "árbol", "flowchart", "diagrama de decision", "arbol de decision", "si entonces", "diagrama si"):
+        return {"intent": "arbol", "equipo": team}
     if has("simulador", "que pasa si", "simular", "y si gana", "y si pierde", "y si empata", "que pasaria si"):
         return {"intent": "simulador"}
     if has("cruces directos", "cruce directo", "duelos directos", "duelo directo", "rivales directos", "mano a mano", "partidos entre", "seis puntos", "finales entre"):
@@ -2251,7 +2339,7 @@ def _llm_parse(q):
         "Respondé EXCLUSIVAMENTE un objeto JSON (sin texto extra, sin ```), con estas claves:\n"
         '- "intent": uno de [necesita, conviene, tabla, panorama, probabilidades, numero_magico, '
         'asegurados, maximos, puesto_exacto, buscar_equipo, ver_grupo, listar_grupos, depende, hoy, relato, '
-        'visual, comparar, puesto, mapa, camino, bisagra, barras, zonas, chances, relato, duelos, porque, simulador, ayuda]\n'
+        'visual, comparar, puesto, mapa, camino, bisagra, barras, zonas, chances, relato, duelos, porque, simulador, arbol, ayuda]\n'
         '- "equipo": nombre EXACTO de un equipo (de cualquier grupo) o null\n'
         '- "equipo2": segundo equipo (solo para comparar) o null\n'
         '- "grupo": letra del grupo (para ver_grupo) o null\n'
@@ -2312,7 +2400,7 @@ def responder(q):
 
     # Cambio automático de grupo si el equipo no está en el grupo cargado
     cur = st.session_state.ESTADO["equipos"]
-    team_intents = {"necesita", "conviene", "numero_magico", "puesto_exacto", "visual", "puesto", "barras", "chances"}
+    team_intents = {"necesita", "conviene", "numero_magico", "puesto_exacto", "visual", "puesto", "barras", "chances", "arbol"}
     ya = acc.get("equipo") and detectar_equipo(acc["equipo"], cur)
     if intent in team_intents and not ya:
         lab, team, datos = _buscar_grupo_de(acc.get("equipo") or q)
