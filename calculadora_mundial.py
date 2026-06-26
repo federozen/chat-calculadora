@@ -606,15 +606,23 @@ def _porque_liga(equipo, base, rest, zonas, texto):
     inalc = sum(1 for x in base if x != equipo and pts[x] > pmax[equipo])
     g = rest.get(equipo, 0)
     if arriba < k:
-        return (f"aunque {equipo} pierda todo lo que le queda (se queda en {pts[equipo]}), "
-                f"solo {arriba} pueden terminar por encima y entran {k}.")
+        pueden = sorted([x for x in base if x != equipo and pmax[x] > pts[equipo]], key=lambda x: -pmax[x])
+        cuales = f"solo {', '.join(pueden)} pueden terminar por encima" if pueden else "nadie puede terminar por encima"
+        return (f"aunque {equipo} pierda todo lo que le queda (se queda en {pts[equipo]}), {cuales}; como entran {k}, ya está adentro.")
     if inalc >= k:
-        return (f"su techo es {pmax[equipo]} pts (ganando sus {g}), y ya hay {inalc} con más puntos que ese techo.")
+        arr = sorted([x for x in base if x != equipo and pts[x] > pmax[equipo]], key=lambda x: -pts[x])
+        muestra = ", ".join(arr[:4]) + (f" y {len(arr)-4} más" if len(arr) > 4 else "")
+        return (f"su techo es {pmax[equipo]} pts (ganando sus {g}), y ya hay {inalc} por encima de ese techo "
+                f"({muestra}): no los puede pasar.")
     otros = sorted(((x, pmax[x]) for x in base if x != equipo), key=lambda kv: -kv[1])
     rt, rm = otros[k-1]
-    falta = max(0, rm + 1 - pts[equipo])
-    return (f"el {k}º que más puede sumar es {rt} (termina como mucho en {rm}); para asegurarte tenés que "
-            f"superarlo ({rm+1}) y hoy tenés {pts[equipo]} → te faltan {falta}.")
+    falta = max(0, rm + 1 - pts[equipo]); mx = pmax[equipo]
+    txt = (f"el {k}º que más puede sumar es {rt} (termina como mucho en {rm}); para asegurarte tenés que "
+           f"superarlo ({rm+1}) y hoy tenés {pts[equipo]} → te faltan {falta}.")
+    if mx <= rm:
+        txt += (f" Y aun ganando todo lo tuyo llegás a {mx}, que no le gana a {rt}: por eso no te alcanza solo, "
+                f"necesitás que {rt}" + (" y compañía" if k > 1 else "") + " pinche(n).")
+    return txt
 
 def _porque_numero_magico(equipo, eqs, jug, pen, n):
     ov = _stats(eqs, jug); rest = _restantes(eqs, pen)
@@ -1211,6 +1219,30 @@ def placa_arbol_png(equipo, eqs, jug, esc, pend):
              fontsize=8, style="italic", color="#666")
     buf = BytesIO(); fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white", pad_inches=0.25); plt.close(fig)
     return buf.getvalue()
+
+def _porque_pasar(equipo, eqs, jug, pen, n):
+    ov = _stats(eqs, jug); rest = _restantes(eqs, pen)
+    pts = {e: ov[e]["pts"] for e in eqs}; pmax = {e: pts[e] + 3 * rest[e] for e in eqs}
+    p = pts[equipo]; mx = pmax[equipo]; g = rest[equipo]
+    pueden = sorted([x for x in eqs if x != equipo and pmax[x] >= p], key=lambda x: -pmax[x])
+    arriba_seg = sorted([x for x in eqs if x != equipo and pts[x] > mx], key=lambda x: -pts[x])
+    def lst(ts, lim=4):
+        ts = list(ts); s = ", ".join(ts[:lim])
+        return s + (f" y {len(ts)-lim} más" if len(ts) > lim else "")
+    if len(pueden) < n:
+        nopas = sorted([x for x in eqs if x != equipo and pmax[x] < p], key=lambda x: -pmax[x])
+        extra = (f" {', '.join(f'{x}, aun ganando todo, llega a {pmax[x]}' for x in nopas[:3])} — no te alcanzan." if nopas else "")
+        cuales = f"solo {lst(pueden)} pueden quedar por encima" if pueden else "nadie puede quedar por encima"
+        return f"{equipo} tiene {p} pts y, aunque no sume más, {cuales}; como entran {n}, ya está adentro.{extra}"
+    if len(arriba_seg) >= n:
+        return (f"el techo de {equipo} es {mx} pts (ganando sus {g}); ya hay {len(arriba_seg)} por encima de ese techo "
+                f"({lst(arriba_seg)}), no los puede pasar → quedó afuera.")
+    igualan = sorted([x for x in eqs if x != equipo and pmax[x] >= mx], key=lambda x: -pmax[x])
+    base_txt = f"{equipo} tiene {p} pts (puede llegar a {mx} ganando sus {g}); todavía lo pueden pasar {lst(pueden)}, así que depende de esos partidos."
+    if len(igualan) >= n:
+        base_txt += (f" Y ojo: aun ganando todo llega a {mx}, pero {lst(igualan)} también pueden llegar a {mx} o más; "
+                     f"por eso ganar lo suyo no le asegura el lugar — necesita que esos pinchen.")
+    return base_txt
 
 def panorama(equipos, jugados, esc, directo=None):
     d = DIRECTO() if directo is None else directo; hay3 = MEJORES_TERCEROS() > 0
@@ -1971,7 +2003,9 @@ def _explicar_porque(E):
         r = _porque_bisagra(eqs, jug, pen, esc)
         return [("md", "🔍 **Por qué:** " + r)] if r else [("info", "No quedan partidos para analizar.")]
     if equipo:
-        return [("md", "🔍 **Por qué:** " + _porque_chances(detectar_equipo(equipo, eqs) or equipo, esc))]
+        eq = detectar_equipo(equipo, eqs) or equipo
+        nn = u.get("n") or DIRECTO()
+        return [("md", "🔍 **Por qué:** " + _porque_pasar(eq, eqs, jug, pen, nn))]
     return [("info", "Preguntá algo concreto (ej.: «cómo viene España», «qué necesita España», «partido bisagra») y después «¿por qué?».")]
 
 
