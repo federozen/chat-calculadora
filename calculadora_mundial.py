@@ -472,7 +472,7 @@ def _png_tabla(spec):
     import textwrap
     ch, rh, cells = spec["col_headers"], spec["row_headers"], spec["cells"]
     nC, nR = len(ch), len(rh)
-    cw, rhw, rht, headh, titleh = 2.5, 2.6, 0.66, 0.74, 0.6
+    cw, rhw, rht, headh, titleh = 2.6, 2.6, 0.78, 0.74, 0.6
     legh = 0.5 if spec.get("leyenda") else 0.0
     footh = 0.4 if spec.get("footer") else 0.0
     W, H = rhw + cw * nC, titleh + headh + rht * nR + legh + footh
@@ -495,7 +495,7 @@ def _png_tabla(spec):
             text, color = cells[i][j]
             x = rhw + cw * j
             ax.add_patch(Rectangle((x, y), cw, rht, facecolor=color, edgecolor="#ffffff", linewidth=2))
-            ax.text(x + cw / 2, y + rht / 2, str(text), fontsize=12, fontweight="bold",
+            ax.text(x + cw / 2, y + rht / 2, "\n".join(textwrap.wrap(str(text), 17)), fontsize=11.5, fontweight="bold",
                     color="#fff" if _is_dark(color) else "#1a1a2e", ha="center", va="center")
         y += rht
     if spec.get("leyenda"):
@@ -588,6 +588,76 @@ def spec_comparar(e1, e2, eqs, jug, esc, pend):
     return {"titulo": f"{e1} vs {e2}", "col_headers": [e1, e2], "row_headers": [r[0] for r in rows],
             "cells": [r[1] for r in rows], "corner": "", "leyenda": None,
             "footer": "«Termina arriba» = en qué % de escenarios cada uno queda por encima del otro."}
+
+_R32 = {73: ("2A", "2B"), 74: ("1E", "3ABCDF"), 75: ("1F", "2C"), 76: ("1C", "2F"),
+        77: ("1I", "3CDFGH"), 78: ("2E", "2I"), 79: ("1A", "3CEFHI"), 80: ("1L", "3EHIJK"),
+        81: ("1D", "3BEFIJ"), 82: ("1G", "3AEHIJ"), 83: ("2K", "2L"), 84: ("1H", "2J"),
+        85: ("1B", "3EFGIJ"), 86: ("1J", "2H"), 87: ("1K", "3DEIJL"), 88: ("2D", "2G")}
+
+def _slot_team(slot, ordenes):
+    pos = int(slot[0]); lab = slot[1]
+    arr = ordenes.get(lab)
+    return arr[pos - 1] if arr and len(arr) >= pos else f"{pos}º {lab}"
+
+def camino_equipo(team, grupos):
+    """grupos: {label:(eqs,jug,pen)}. Devuelve el cruce de 16avos del equipo según salga 1º/2º/3º."""
+    G = next((lab for lab, (eqs, _, _) in grupos.items() if team in eqs), None)
+    if not G:
+        return None
+    ordenes = {lab: list(tabla(eqs, jug)["Equipo"]) for lab, (eqs, jug, _) in grupos.items()}
+    def opp_of(slot):
+        for m, (a, b) in _R32.items():
+            if a == slot: return m, b
+            if b == slot: return m, a
+        return None, None
+    m1, opp1 = opp_of("1" + G)
+    m2, opp2 = opp_of("2" + G)
+    terceros = []
+    for m, (a, b) in _R32.items():
+        for slot, other in ((a, b), (b, a)):
+            if slot.startswith("3") and G in slot[1:] and other.startswith("1"):
+                terceros.append((m, other))
+    return {"grupo": G, "ordenes": ordenes, "1": (m1, opp1), "2": (m2, opp2), "3": terceros}
+
+def spec_camino(team, grupos):
+    info = camino_equipo(team, grupos)
+    if not info:
+        return None
+    o = info["ordenes"]; G = info["grupo"]
+    rows, cells = [], []
+    m1, opp1 = info["1"]; m2, opp2 = info["2"]
+    rows.append(f"Sale 1º (M{m1})")
+    cells.append([(f"{opp1[0]}º del Grupo {opp1[1]}", _C_NEU), (_slot_team(opp1, o), "#1b5e20")])
+    rows.append(f"Sale 2º (M{m2})")
+    cells.append([(f"{opp2[0]}º del Grupo {opp2[1]}", _C_NEU), (_slot_team(opp2, o), "#2e7d32")])
+    if info["3"]:
+        wslots = sorted({w for _, w in info["3"]})
+        setg = "/".join(s[1] for s in wslots)
+        rows.append("Sale 3º (si clasifica)")
+        cells.append([(f"1º de {setg}", _C_NEU), (f"uno de {len(wslots)} (ver detalle)", _C_3)])
+    return {"titulo": f"Camino de {team} en 16avos · Grupo {G}",
+            "col_headers": ["El cruce", "Rival hoy"], "row_headers": rows, "cells": cells,
+            "corner": "", "leyenda": None,
+            "footer": "Proyección con las posiciones de hoy; el rival cambia según cómo terminen los grupos."}
+
+def camino_texto(team, grupos):
+    info = camino_equipo(team, grupos)
+    if not info:
+        return None
+    o = info["ordenes"]; G = info["grupo"]
+    st_ = lambda s: _slot_team(s, o)
+    m1, opp1 = info["1"]; m2, opp2 = info["2"]
+    L = [f"**Camino de {team} en 16avos (Grupo {G}):**",
+         f"- Si sale **1º** (Match {m1}): vs **{opp1[0]}º del Grupo {opp1[1]}** → hoy *{st_(opp1)}*.",
+         f"- Si sale **2º** (Match {m2}): vs **{opp2[0]}º del Grupo {opp2[1]}** → hoy *{st_(opp2)}*."]
+    if info["3"]:
+        wslots = sorted({w for _, w in info["3"]})
+        cand = ", ".join(f"{st_(s)} (1º {s[1]})" for s in wslots)
+        L.append(f"- Si sale **3º** y entra entre los 8 mejores terceros: vs el **ganador** de uno de los grupos "
+                 f"{'/'.join(s[1] for s in wslots)} → candidatos hoy: {cand}. "
+                 f"(El cruce exacto lo fija la tabla de 495 combinaciones de FIFA cuando terminen los grupos.)")
+    L.append("_Proyección con las posiciones actuales; puede cambiar según cómo terminen los grupos._")
+    return "\n\n".join(L)
 
 def panorama(equipos, jugados, esc, directo=None):
     d = DIRECTO() if directo is None else directo; hay3 = MEJORES_TERCEROS() > 0
@@ -1185,18 +1255,31 @@ def _buscar_grupo_de(team_q):
     return None, None, None
 
 
-AYUDA_MD = """**¿Qué puedo responder?** Por ejemplo:
+AYUDA_MD = """**Todo esto funciona escribiéndolo (no hace falta el asistente Claude).** Ejemplos:
 
-- **¿Qué necesita España?** — qué tiene que pasar para clasificar (y si puede, para ser campeón / mejor tercero).
-- **¿Qué le conviene a Uruguay?** — qué resultado propio le sirve y qué hinchar en los otros partidos.
-- **¿En qué grupo está Brasil?** · **Equipos del grupo C** · **¿Qué grupos hay?**
-- **¿De quién depende?** (si cada equipo depende de sí mismo o necesita ayuda) · **Si terminara hoy** (quién pasa con la tabla actual)
-- **¿Puede ser campeón Cabo Verde?** · **¿Qué necesita Arabia para no descender?**
-- **Tabla** · **Panorama** · **Probabilidades** · **Número mágico de España** · **Asegurados**
+**Qué necesita cada uno**
+- *¿Qué necesita España?* · *¿Puede ser campeón Cabo Verde?* · *¿Qué necesita Arabia para no descender?*
+- *¿Qué le conviene a Uruguay?* (su resultado + qué hinchar en los otros partidos)
+- *¿De quién depende?* (si cada equipo depende de sí mismo o necesita ayuda) · *Si terminara hoy*
+
+**Datos del grupo**
+- *Tabla* · *Panorama* · *Probabilidades* · *Número mágico de España* · *Máximos* · *Asegurados*
+
+**Buscar grupos** (con el torneo completo cargado)
+- *¿En qué grupo está Brasil?* · *Equipos del grupo C* · *¿Qué grupos hay?*
+
+**Placas visuales (se descargan como imagen)**
+- *Grilla de España* — qué necesita, en cuadro de colores
+- *Comparar España y Uruguay* — cara a cara
+- *España puede salir 1º* — cuándo termina en ese puesto
+- *Mapa del grupo* — mapa de calor de en qué puesto termina cada uno
+- *Rival de Argentina en 16avos* — el cruce y los posibles rivales (cuadro oficial de FIFA)
+
+**Para la nota**
+- *Contame el escenario de Uruguay* · *Relato del grupo* — texto listo para publicar
 
 Podés encadenar sin repetir el equipo: *«¿qué necesita Uruguay?»* y después *«¿y qué le conviene?»*.
-Si preguntás por un equipo de otro grupo, **cambio solo** a ese grupo. Y si a un equipo le quedan
-varios partidos, te respondo por **puntos** (con cuántos clasifica)."""
+Si preguntás por un equipo de otro grupo, **cambio solo** a ese grupo."""
 
 AYUDA_LIGA = """Esto es una **liga** (muchas fechas): el detalle gol por gol no se puede calcular, así que trabajo **por puntos**:
 
@@ -1223,6 +1306,21 @@ def ejecutar_accion(acc):
     eqs, jug, pen, esc = E["equipos"], E["jugados"], E["pendientes"], E["esc"]
     if equipo and equipo not in eqs:
         equipo = detectar_equipo(equipo, eqs)
+
+    # ── CAMINO A 16AVOS / RIVALES (necesita el torneo completo cargado) ──
+    if intent == "camino":
+        grupos = _tour_grupos()
+        if len(grupos) < 2:
+            return [("info", "Para los cruces de 16avos necesito el torneo completo cargado (todos los grupos), por API o pegando todo.")]
+        tt = acc.get("equipo") or equipo
+        if not tt or not any(tt in g[0] for g in grupos.values()):
+            tt = "Argentina" if any("Argentina" in g[0] for g in grupos.values()) else (_buscar_grupo_de(acc.get("equipo") or "")[1])
+        if not tt:
+            return [("warning", "¿De qué equipo querés el cruce? Ej.: «rival de Argentina en 16avos».")]
+        spec = spec_camino(tt, grupos)
+        if not spec:
+            return [("warning", f"No encuentro a {tt} en los grupos cargados.")]
+        return [_placa(spec, f"camino_{tt}.png"), ("md", camino_texto(tt, grupos))]
 
     # ── MODO LIGA (por puntos): cuando hay demasiados partidos para enumerar ──
     if esc is None:
@@ -1439,6 +1537,10 @@ def _parse_kw(q):
         return {"intent": "ayuda"}
     if has("relato", "contame", "para la nota", "escribime", "escribi ", "narra", "narrá", "parrafo", "párrafo", "escenario escrito", "resumen escrito", "resumime", "redacta"):
         return {"intent": "relato", "equipo": team}
+    if has("16avos", "dieciseisavos", "cruce", "rival", "posible rival", "posibles rivales", "camino", "contra quien", "a quien enfrenta", "con quien le toca", "con quien juega"):
+        _allt = [e for (e2, _, _) in _tour_grupos().values() for e in e2] or eqs
+        tcam = detectar_equipo(q, _allt) or ("Argentina" if "Argentina" in _allt else None)
+        return {"intent": "camino", "equipo": tcam}
     if has("visual", "grilla", "matriz", "cuadro de escenarios", "mapa de escenarios", "tabla de escenarios", "grafic", "placa"):
         return {"intent": "visual", "equipo": team}
     if has("mapa", "calor", "heatmap", "reparto de puesto", "como se reparten", "donde termina cada"):
@@ -1501,7 +1603,7 @@ def _llm_parse(q):
         "Respondé EXCLUSIVAMENTE un objeto JSON (sin texto extra, sin ```), con estas claves:\n"
         '- "intent": uno de [necesita, conviene, tabla, panorama, probabilidades, numero_magico, '
         'asegurados, maximos, puesto_exacto, buscar_equipo, ver_grupo, listar_grupos, depende, hoy, relato, '
-        'visual, comparar, puesto, mapa, ayuda]\n'
+        'visual, comparar, puesto, mapa, camino, ayuda]\n'
         '- "equipo": nombre EXACTO de un equipo (de cualquier grupo) o null\n'
         '- "equipo2": segundo equipo (solo para comparar) o null\n'
         '- "grupo": letra del grupo (para ver_grupo) o null\n'
@@ -1514,6 +1616,7 @@ def _llm_parse(q):
         "'contame/escribime/relato/para la nota' => relato (equipo si lo nombran, si no el grupo). "
         "'grilla/visual/matriz' => visual (equipo). 'comparar X y Z'/'X vs Z' => comparar (equipo=X, equipo2=Z). "
         "'X puede salir/terminar Nº' => puesto (equipo=X, n=N). 'mapa/mapa de calor/dónde termina cada uno' => mapa. "
+        "'rival de X'/'cruce de X en 16avos'/'camino de X'/'posibles rivales' => camino (equipo=X; si no nombran equipo y juega Argentina, equipo=Argentina). "
         "'campeón'/'ganar el grupo' => objetivo campeon. 'no descender' => descenso."
     )
     body = {"model": st.session_state.LLM_MODEL, "max_tokens": 400,
@@ -1533,16 +1636,22 @@ def _llm_parse(q):
 def responder(q):
     usar_llm = st.session_state.LLM_ON and str(st.session_state.LLM_KEY).strip()
     intro = None
+    err_note = None
     if usar_llm:
         try:
             acc, intro = _llm_parse(q)
+            st.session_state["LLM_ERROR"] = ""
         except Exception as e:
             acc = _parse_kw(q)
-            st.toast(f"LLM no disponible ({str(e)[:50]}…); uso el router por palabras.")
+            st.session_state["LLM_ERROR"] = str(e)[:200]
+            err_note = ("info", f"⚠️ El asistente Claude no respondió ({str(e)[:90]}…). Te respondo igual por palabras clave. "
+                                "Revisá la API key y el modelo en el panel; o desactivalo (todo funciona por palabras clave: escribí «ayuda»).")
     else:
         acc = _parse_kw(q)
 
     pre = [("md", f"_{intro}_")] if intro else []
+    if err_note:
+        pre = [err_note] + pre
     intent = acc.get("intent")
 
     if intent == "listar_grupos":
@@ -1611,6 +1720,10 @@ with st.sidebar:
             help="Ej.: claude-haiku-4-5 (rápido y barato), claude-sonnet-4-6, claude-opus-4-8.")
         if not str(st.session_state.LLM_KEY).strip():
             st.caption("Sin key, uso el router por palabras clave.")
+        if st.session_state.get("LLM_ERROR"):
+            st.warning(f"Último error del asistente: {st.session_state['LLM_ERROR']}")
+            st.caption("Si dice 'model'/'404', revisá el nombre del modelo. Si dice '401'/'authentication', es la API key. "
+                       "El chat funciona igual por palabras clave (escribí «ayuda»).")
     if st.button("🧹 Limpiar conversación", use_container_width=True):
         st.session_state.chat = [{"role": "assistant", "blocks": [("md", BIENVENIDA)]}]
         st.rerun()
