@@ -426,7 +426,93 @@ def _celda_estado(g2, d, hay3):
     return ("#b71c1c", "✗")
 
 def matriz_necesita_html(equipo, esc, pend):
-    """Grilla coloreada: filas = resultado propio, columnas = el/los otros partidos."""
+    s = spec_necesita(equipo, esc, pend)
+    return _html_tabla(s) if s else None
+
+_C_DIR, _C_DG, _C_3, _C_OUT, _C_GREY, _C_HEAD, _C_NEU = "#1b5e20", "#ef6c00", "#f9a825", "#b71c1c", "#9e9e9e", "#f4f6ef", "#eef1e8"
+
+def _is_dark(c):
+    c = c.lstrip("#")
+    if len(c) != 6: return False
+    r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+    return (0.299 * r + 0.587 * g + 0.114 * b) < 150
+
+def _verde(pct):
+    t = max(0, min(1, pct / 100))
+    r = int(255 + (27 - 255) * t); g = int(255 + (94 - 255) * t); b = int(255 + (32 - 255) * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+def _html_tabla(spec):
+    th = "padding:8px 10px;font:600 13px Barlow,sans-serif;color:#1a1a2e;border:1px solid #e0e0e0;background:#f4f6ef;text-align:center"
+    ch, rh, cells = spec["col_headers"], spec["row_headers"], spec["cells"]
+    h = [f'<div style="font:700 17px Barlow,sans-serif;color:#1a1a2e;margin:8px 0 4px">{spec["titulo"]}</div>'] if spec.get("titulo") else []
+    h.append('<div style="overflow-x:auto"><table style="border-collapse:collapse;margin:6px 0">')
+    h.append(f'<tr><th style="{th};text-align:left">{spec.get("corner","")}</th>' + "".join(f'<th style="{th}">{c}</th>' for c in ch) + "</tr>")
+    for i, rl in enumerate(rh):
+        h.append(f'<tr><th style="{th};text-align:left">{rl}</th>')
+        for j in range(len(ch)):
+            text, color = cells[i][j]
+            tcol = "#fff" if _is_dark(color) else "#1a1a2e"
+            h.append(f'<td style="padding:12px 10px;border:1px solid #fff;text-align:center;background:{color};color:{tcol};font:700 15px Barlow,sans-serif">{text}</td>')
+        h.append("</tr>")
+    h.append("</table></div>")
+    if spec.get("leyenda"):
+        chip = "color:#fff;padding:1px 7px;border-radius:3px;font:600 12px Barlow,sans-serif"
+        h.append('<div style="margin-top:6px;line-height:2">' + " &nbsp; ".join(f'<span style="background:{c};{chip}">{l}</span>' for c, l in spec["leyenda"]) + "</div>")
+    if spec.get("footer"):
+        h.append(f'<div style="font:italic 12px Barlow,sans-serif;color:#666;margin-top:4px">{spec["footer"]}</div>')
+    return "".join(h)
+
+def _png_tabla(spec):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    from io import BytesIO
+    import textwrap
+    ch, rh, cells = spec["col_headers"], spec["row_headers"], spec["cells"]
+    nC, nR = len(ch), len(rh)
+    cw, rhw, rht, headh, titleh = 2.5, 2.6, 0.66, 0.74, 0.6
+    legh = 0.5 if spec.get("leyenda") else 0.0
+    footh = 0.4 if spec.get("footer") else 0.0
+    W, H = rhw + cw * nC, titleh + headh + rht * nR + legh + footh
+    fig, ax = plt.subplots(figsize=(W, H), dpi=200)
+    ax.set_xlim(0, W); ax.set_ylim(0, H); ax.axis("off"); ax.invert_yaxis()
+    if spec.get("titulo"):
+        ax.text(0.05, titleh * 0.55, spec["titulo"], fontsize=15, fontweight="bold", color="#1a1a2e", va="center")
+    y = titleh
+    ax.add_patch(Rectangle((0, y), rhw, headh, facecolor=_C_HEAD, edgecolor="#e0e0e0"))
+    ax.text(0.12, y + headh / 2, spec.get("corner", ""), fontsize=9, fontweight="bold", color="#1a1a2e", va="center")
+    for j, hd in enumerate(ch):
+        x = rhw + cw * j
+        ax.add_patch(Rectangle((x, y), cw, headh, facecolor=_C_HEAD, edgecolor="#e0e0e0"))
+        ax.text(x + cw / 2, y + headh / 2, "\n".join(textwrap.wrap(str(hd), 18)), fontsize=9, fontweight="bold", color="#1a1a2e", ha="center", va="center")
+    y += headh
+    for i, rl in enumerate(rh):
+        ax.add_patch(Rectangle((0, y), rhw, rht, facecolor=_C_HEAD, edgecolor="#e0e0e0"))
+        ax.text(0.12, y + rht / 2, "\n".join(textwrap.wrap(str(rl), 22)), fontsize=9, fontweight="bold", color="#1a1a2e", va="center")
+        for j in range(nC):
+            text, color = cells[i][j]
+            x = rhw + cw * j
+            ax.add_patch(Rectangle((x, y), cw, rht, facecolor=color, edgecolor="#ffffff", linewidth=2))
+            ax.text(x + cw / 2, y + rht / 2, str(text), fontsize=12, fontweight="bold",
+                    color="#fff" if _is_dark(color) else "#1a1a2e", ha="center", va="center")
+        y += rht
+    if spec.get("leyenda"):
+        lx = 0.05
+        for color, label in spec["leyenda"]:
+            ax.add_patch(Rectangle((lx, y + 0.12), 0.34, 0.26, facecolor=color, edgecolor="none"))
+            ax.text(lx + 0.44, y + 0.25, label, fontsize=8.5, color="#444", va="center")
+            lx += 0.6 + 0.085 * len(label)
+        y += legh
+    if spec.get("footer"):
+        ax.text(0.05, y + 0.2, spec["footer"], fontsize=8, style="italic", color="#666", va="center")
+    buf = BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white", pad_inches=0.18)
+    plt.close(fig)
+    return buf.getvalue()
+
+def spec_necesita(equipo, esc, pend):
     if len(_pd_de(equipo, pend)) != 1:
         return None
     d = DIRECTO(); hay3 = MEJORES_TERCEROS() > 0
@@ -435,28 +521,73 @@ def matriz_necesita_html(equipo, esc, pend):
     df["_o"] = df.apply(lambda r: _res_otros(r, equipo, pend), axis=1)
     filas = [k for k, _ in sorted(df.groupby("_p"), key=lambda kv: kv[1]["_pos"].mean())]
     cols = [k for k, _ in sorted(df.groupby("_o"), key=lambda kv: kv[1]["_pos"].mean())]
-    th = "padding:8px 10px;font:600 13px Barlow,sans-serif;color:#1a1a2e;border:1px solid #e0e0e0;background:#f4f6ef;text-align:center"
-    h = ['<div style="overflow-x:auto"><table style="border-collapse:collapse;margin:6px 0">']
-    h.append(f'<tr><th style="{th};text-align:left">{equipo} ⬇ &nbsp;/&nbsp; otros ➡</th>'
-             + "".join(f'<th style="{th}">{c}</th>' for c in cols) + "</tr>")
+    cells = []
     for fp in filas:
-        h.append(f'<tr><th style="{th};text-align:left">{fp}</th>')
+        row = []
         for c in cols:
             g2 = df[(df["_p"] == fp) & (df["_o"] == c)]
             if len(g2) == 0:
-                h.append(f'<td style="{th}">—</td>'); continue
+                row.append(("—", "#e0e0e0")); continue
             color, label = _celda_estado(g2, d, hay3)
-            h.append(f'<td style="padding:12px 10px;border:1px solid #e0e0e0;text-align:center;'
-                     f'background:{color};color:#fff;font:700 15px Barlow,sans-serif">{label}</td>')
-        h.append("</tr>")
-    h.append("</table></div>")
-    chip = "color:#fff;padding:1px 7px;border-radius:3px;font:600 12px Barlow,sans-serif"
-    leyenda = (f'<div style="margin-top:6px;line-height:2">'
-               f'<span style="background:#1b5e20;{chip}">2º ✓</span> clasifica directo &nbsp; '
-               f'<span style="background:#ef6c00;{chip}">DG</span> según diferencia de gol &nbsp; '
-               f'<span style="background:#f9a825;{chip}">3º*</span> 3º (depende de otros grupos) &nbsp; '
-               f'<span style="background:#b71c1c;{chip}">✗</span> afuera</div>')
-    return "".join(h) + leyenda
+            row.append((label, color))
+        cells.append(row)
+    leyenda = [(_C_DIR, "clasifica directo"), (_C_DG, "según dif. de gol"), (_C_3, "3º (depende)"), (_C_OUT, "afuera")]
+    return {"titulo": f"Qué necesita {equipo}", "col_headers": cols, "row_headers": filas, "cells": cells,
+            "corner": f"{equipo} ⬇ / otros ➡", "leyenda": leyenda,
+            "footer": f"Filas = resultado de {equipo}; columnas = el otro partido del grupo."}
+
+def spec_puesto(equipo, esc, pend, puesto):
+    if len(_pd_de(equipo, pend)) != 1:
+        return None
+    df = esc.copy(); df["_pos"] = esc[f"Pos {equipo}"].values
+    df["_p"] = df.apply(lambda r: _res_propio(r, equipo, pend), axis=1)
+    df["_o"] = df.apply(lambda r: _res_otros(r, equipo, pend), axis=1)
+    filas = [k for k, _ in sorted(df.groupby("_p"), key=lambda kv: kv[1]["_pos"].mean())]
+    cols = [k for k, _ in sorted(df.groupby("_o"), key=lambda kv: kv[1]["_pos"].mean())]
+    cells = []
+    for fp in filas:
+        row = []
+        for c in cols:
+            g2 = df[(df["_p"] == fp) & (df["_o"] == c)]
+            S = set(int(x) for x in g2["_pos"].unique())
+            if S == {puesto}:     row.append((f"{puesto}º ✓", _C_DIR))
+            elif puesto in S:     row.append(("a veces", _C_DG))
+            else:                 row.append(("—", _C_GREY))
+        cells.append(row)
+    leyenda = [(_C_DIR, f"termina {puesto}º"), (_C_DG, f"puede ({puesto}º o no)"), (_C_GREY, "no")]
+    return {"titulo": f"¿Cuándo {equipo} termina {puesto}º?", "col_headers": cols, "row_headers": filas, "cells": cells,
+            "corner": f"{equipo} ⬇ / otros ➡", "leyenda": leyenda,
+            "footer": f"Verde = {equipo} queda {puesto}º seguro; ámbar = depende; gris = no llega."}
+
+def spec_mapa(eqs, esc):
+    T = len(esc); n = len(eqs)
+    order = sorted(eqs, key=lambda e: esc[f"Pos {e}"].mean())
+    cols = [f"{k}º" for k in range(1, n + 1)]
+    cells = []
+    for e in order:
+        pos = esc[f"Pos {e}"]; row = []
+        for k in range(1, n + 1):
+            pct = round(100 * (pos == k).sum() / T)
+            row.append((f"{pct}%" if pct else "·", _verde(pct)))
+        cells.append(row)
+    return {"titulo": "Mapa del grupo · dónde termina cada uno", "col_headers": cols, "row_headers": order, "cells": cells,
+            "corner": "equipo ⬇ / puesto ➡", "leyenda": None,
+            "footer": "% de escenarios en que cae en cada puesto (conteo de marcadores, no probabilidad real)."}
+
+def spec_comparar(e1, e2, eqs, jug, esc, pend):
+    t = tabla(eqs, jug).set_index("Equipo"); pos = posiciones(eqs, jug); rest = _restantes(eqs, pend)
+    pmax = lambda e: int(t.loc[e].PTS) + 3 * rest[e]
+    s1 = round(100 * (esc[f"Pos {e1}"] < esc[f"Pos {e2}"]).sum() / len(esc))
+    s2 = round(100 * (esc[f"Pos {e2}"] < esc[f"Pos {e1}"]).sum() / len(esc))
+    N = _C_NEU
+    rows = [("Posición actual", [(f"{pos[e1]}º", N), (f"{pos[e2]}º", N)]),
+            ("Puntos", [(str(int(t.loc[e1].PTS)), N), (str(int(t.loc[e2].PTS)), N)]),
+            ("Dif. de gol", [(f"{int(t.loc[e1].DG):+d}", N), (f"{int(t.loc[e2].DG):+d}", N)]),
+            ("Máx. posible", [(str(pmax(e1)), N), (str(pmax(e2)), N)]),
+            ("Termina arriba", [(f"{s1}%", _C_DIR if s1 >= s2 else _C_OUT), (f"{s2}%", _C_DIR if s2 > s1 else _C_OUT)])]
+    return {"titulo": f"{e1} vs {e2}", "col_headers": [e1, e2], "row_headers": [r[0] for r in rows],
+            "cells": [r[1] for r in rows], "corner": "", "leyenda": None,
+            "footer": "«Termina arriba» = en qué % de escenarios cada uno queda por encima del otro."}
 
 def panorama(equipos, jugados, esc, directo=None):
     d = DIRECTO() if directo is None else directo; hay3 = MEJORES_TERCEROS() > 0
@@ -1007,6 +1138,27 @@ def detectar_equipo(q, equipos):
                 return e
     return None
 
+def detectar_equipos(q, equipos, k=2):
+    qn = _norm_txt(q); found = []
+    for e in sorted(equipos, key=lambda x: -len(x)):
+        if _norm_txt(e) in qn and e not in found:
+            found.append(e)
+        if len(found) >= k:
+            break
+    return found
+
+def _pos_pedida(qn):
+    m = _re.search(r"\b([1-9])\s*[oº°]?\b", qn)
+    if m:
+        return int(m.group(1))
+    for w, k in [("primer", 1), ("segundo", 2), ("tercer", 3), ("cuarto", 4), ("quinto", 5)]:
+        if w in qn:
+            return k
+    return None
+
+def _placa(spec, fname):
+    return ("placa", _html_tabla(spec), _png_tabla(spec), fname)
+
 
 # ─── NAVEGACIÓN ENTRE GRUPOS (si se cargó el torneo completo) ─────────────────────
 def _tour_grupos():
@@ -1131,13 +1283,31 @@ def ejecutar_accion(acc):
     if intent == "visual":
         if not equipo:
             return [("warning", "¿De qué equipo querés la grilla? Probá «grilla de España».")]
-        html = matriz_necesita_html(equipo, esc, pen)
-        if not html:
+        spec = spec_necesita(equipo, esc, pen)
+        if not spec:
             return [("info", f"A {equipo} le queda más de un partido, así que la grilla sería enorme. Va el detalle en texto:"),
                     ("md", que_necesita_completo_texto(equipo, esc, pen))]
-        return [("md", f"### Qué necesita {equipo} · grilla de escenarios"),
-                ("html", html),
-                ("md", f"_Filas = resultado de {equipo}; columnas = el otro partido del grupo._")]
+        return [_placa(spec, f"necesita_{equipo}.png")]
+    if intent == "mapa":
+        return [_placa(spec_mapa(eqs, esc), "mapa_grupo.png")]
+    if intent == "comparar":
+        e2 = acc.get("equipo2")
+        if not (equipo and e2):
+            return [("warning", "Decime los dos equipos. Ej.: «comparar España y Uruguay».")]
+        if e2 not in eqs:
+            e2 = detectar_equipo(e2, eqs)
+        if not e2 or e2 == equipo:
+            return [("warning", "Necesito dos equipos distintos del mismo grupo para comparar.")]
+        return [_placa(spec_comparar(equipo, e2, eqs, jug, esc, pen), f"comparar_{equipo}_{e2}.png")]
+    if intent == "puesto":
+        if not equipo:
+            return [("warning", "¿De qué equipo? Ej.: «España puede salir 1º».")]
+        puesto = n or 1
+        spec = spec_puesto(equipo, esc, pen, puesto)
+        if not spec:
+            return [("info", f"A {equipo} le queda más de un partido; la grilla sería enorme. Va el detalle en texto:"),
+                    ("md", resultados_para_puesto_texto(equipo, esc, pen, ("exacto", puesto)))]
+        return [_placa(spec, f"{equipo}_puesto_{puesto}.png")]
     if intent == "asegurados":
         nn = n or DIRECTO()
         return [("df", clasificado_eliminado(eqs, jug, pen, nn), f"Asegurados / sin chances (top {nn})")]
@@ -1271,6 +1441,15 @@ def _parse_kw(q):
         return {"intent": "relato", "equipo": team}
     if has("visual", "grilla", "matriz", "cuadro de escenarios", "mapa de escenarios", "tabla de escenarios", "grafic", "placa"):
         return {"intent": "visual", "equipo": team}
+    if has("mapa", "calor", "heatmap", "reparto de puesto", "como se reparten", "donde termina cada"):
+        return {"intent": "mapa"}
+    if has("comparar", "compara", "versus", " vs ", "vs.", "mano a mano", "frente a", "enfrenta", "contra "):
+        dos = detectar_equipos(q, eqs, 2)
+        if len(dos) == 2:
+            return {"intent": "comparar", "equipo": dos[0], "equipo2": dos[1]}
+    _posq = _pos_pedida(qn)
+    if _posq and has("puede salir", "puede ser", "puede terminar", "puede quedar", "sale ", "termina", "terminar", "queda ", "salir") and not has("necesita", "conviene"):
+        return {"intent": "puesto", "equipo": team, "n": _posq}
     # navegación de grupos
     if has("en que grupo", "en cual grupo", "donde juega", "donde esta", "de que grupo", "grupo de", "que grupo es"):
         return {"intent": "buscar_equipo", "equipo": q}
@@ -1321,17 +1500,20 @@ def _llm_parse(q):
         "Sos un router de intención para una calculadora de escenarios de fútbol.\n" + contexto + "\n\n"
         "Respondé EXCLUSIVAMENTE un objeto JSON (sin texto extra, sin ```), con estas claves:\n"
         '- "intent": uno de [necesita, conviene, tabla, panorama, probabilidades, numero_magico, '
-        'asegurados, maximos, puesto_exacto, buscar_equipo, ver_grupo, listar_grupos, depende, hoy, relato, visual, ayuda]\n'
+        'asegurados, maximos, puesto_exacto, buscar_equipo, ver_grupo, listar_grupos, depende, hoy, relato, '
+        'visual, comparar, puesto, mapa, ayuda]\n'
         '- "equipo": nombre EXACTO de un equipo (de cualquier grupo) o null\n'
+        '- "equipo2": segundo equipo (solo para comparar) o null\n'
         '- "grupo": letra del grupo (para ver_grupo) o null\n'
         '- "objetivo": solo si intent=necesita: [clasificar, campeon, champions, descenso, tercero]; default clasificar\n'
-        '- "n": entero o null\n'
+        '- "n": entero o null (top N, descenso N, o el puesto para intent=puesto/puesto_exacto)\n'
         '- "intro": una frase breve en español rioplatense que presente la respuesta, SIN dar números ni resultados.\n'
         "Pistas: 'en qué grupo está X'/'dónde juega X' => buscar_equipo (equipo=X). "
         "'equipos del grupo C'/'grupo C' => ver_grupo (grupo='C'). 'qué grupos hay' => listar_grupos. "
         "'de quién depende X'/'lo tiene en sus manos' => depende. 'si terminara hoy'/'quién pasa hoy' => hoy. "
         "'contame/escribime/relato/para la nota' => relato (equipo si lo nombran, si no el grupo). "
-        "'grilla/visual/matriz/cuadro de escenarios' => visual (equipo). "
+        "'grilla/visual/matriz' => visual (equipo). 'comparar X y Z'/'X vs Z' => comparar (equipo=X, equipo2=Z). "
+        "'X puede salir/terminar Nº' => puesto (equipo=X, n=N). 'mapa/mapa de calor/dónde termina cada uno' => mapa. "
         "'campeón'/'ganar el grupo' => objetivo campeon. 'no descender' => descenso."
     )
     body = {"model": st.session_state.LLM_MODEL, "max_tokens": 400,
@@ -1372,7 +1554,7 @@ def responder(q):
 
     # Cambio automático de grupo si el equipo no está en el grupo cargado
     cur = st.session_state.ESTADO["equipos"]
-    team_intents = {"necesita", "conviene", "numero_magico", "puesto_exacto", "visual"}
+    team_intents = {"necesita", "conviene", "numero_magico", "puesto_exacto", "visual", "puesto"}
     ya = acc.get("equipo") and detectar_equipo(acc["equipo"], cur)
     if intent in team_intents and not ya:
         lab, team, datos = _buscar_grupo_de(acc.get("equipo") or q)
@@ -1390,11 +1572,14 @@ def responder(q):
     return pre + ejecutar_accion(acc)
 
 
-def render_blocks(blocks):
-    for b in blocks:
+def render_blocks(blocks, prefix="x"):
+    for i, b in enumerate(blocks):
         kind = b[0]
         if kind == "md":
             st.markdown(b[1])
+        elif kind == "placa":
+            st.markdown(b[1], unsafe_allow_html=True)
+            st.download_button("Descargar imagen", b[2], file_name=b[3], mime="image/png", key=f"{prefix}_dl{i}")
         elif kind == "df":
             st.dataframe(b[1], use_container_width=True, hide_index=True)
             if len(b) > 2 and b[2]:
@@ -1444,9 +1629,9 @@ if len(_gs_tot) > 1:
 if "chat" not in st.session_state:
     st.session_state.chat = [{"role": "assistant", "blocks": [("md", BIENVENIDA)]}]
 
-for msg in st.session_state.chat:
+for _mi, msg in enumerate(st.session_state.chat):
     with st.chat_message(msg["role"], avatar="⚽" if msg["role"] == "assistant" else None):
-        render_blocks(msg["blocks"])
+        render_blocks(msg["blocks"], prefix=f"m{_mi}")
 
 st.caption("Sugerencias rápidas:")
 sug = [f"¿Qué necesita {equipos[0]}?", "¿De quién depende?", "Si terminara hoy",
