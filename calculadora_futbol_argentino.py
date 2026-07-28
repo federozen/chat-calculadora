@@ -1781,7 +1781,9 @@ def _match_eq(nombre, equipos):
 def mapear_fixture(pend, equipos):
     out, caidos = [], []
     for a, b in pend:
-        ma, mb = _match_eq(a, equipos), _match_eq(b, equipos)
+        ca_, cb_ = canon_club(a), canon_club(b)
+        ma = ca_ if ca_ in equipos else _match_eq(a, equipos)
+        mb = cb_ if cb_ in equipos else _match_eq(b, equipos)
         if ma and mb and ma != mb:
             out.append((ma, mb))
         else:
@@ -3379,9 +3381,8 @@ with st.sidebar:
                 _jx, _px, _nx, _efx = espn_fixture("arg.1", 120)
                 _eqx = [e for b in _Zx.values() for e in b]
                 _parx, _ = mapear_fixture(_px or [], _eqx)
-                _rx = {}
-                for _lab, _bz in _Zx.items():
-                    _rx.update(liga_restantes(list(_bz.keys()), _parx, None))
+                _rx = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0))
+                       for _bz in _Zx.values() for e, d in _bz.items()}
                 if not st.session_state.get("LPF_ANUAL"):
                     st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
                     _pv0 = parse_promedios_tabla(PROMEDIOS_LPF_2026)[0]
@@ -3476,9 +3477,8 @@ with st.sidebar:
                 _pend = _p1 or _p2 or []
                 _pares, _ = mapear_fixture(_pend, _eqs) if _pend else ([], [])
                 _gl = _g1 if _g1 is not None else _g2
-                _rest = {}
-                for _lab, _bz in _Z.items():
-                    _rest.update(liga_restantes(list(_bz.keys()), _pares, _gl))
+                _rest = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0))
+                         for _bz in _Z.values() for e, d in _bz.items()}
                 _anual_dir = st.session_state.get("LPF_ANUAL") or {}
                 if (_an or "").strip():
                     _anual_dir = parse_tabla_anual(_an)[0]
@@ -3714,9 +3714,8 @@ if not st.session_state.ESTADO:
                 _jx, _px, _nx, _efx = espn_fixture("arg.1", 120)
                 _eqx = [e for b in _Zx.values() for e in b]
                 _parx, _ = mapear_fixture(_px or [], _eqx)
-                _rx = {}
-                for _lab, _bz in _Zx.items():
-                    _rx.update(liga_restantes(list(_bz.keys()), _parx, None))
+                _rx = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0))
+                       for _bz in _Zx.values() for e, d in _bz.items()}
                 if not st.session_state.get("LPF_ANUAL"):
                     st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
                     _pv0 = parse_promedios_tabla(PROMEDIOS_LPF_2026)[0]
