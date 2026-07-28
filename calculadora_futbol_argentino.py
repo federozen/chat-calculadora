@@ -3382,10 +3382,16 @@ with st.sidebar:
                 _rx = {}
                 for _lab, _bz in _Zx.items():
                     _rx.update(liga_restantes(list(_bz.keys()), _parx, None))
+                if not st.session_state.get("LPF_ANUAL"):
+                    st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
+                    _pv0 = parse_promedios_tabla(PROMEDIOS_LPF_2026)[0]
+                    st.session_state.PROM_TXT = promedios_previas_texto(_pv0)
+                    st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
+                    st.session_state.LPF_HIST_OK = f"{len(st.session_state.LPF_ANUAL)} equipos en la anual"
                 st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqx, zonas_lpf=_Zx,
                                                anual_directo=st.session_state.get("LPF_ANUAL") or {},
                                                pendientes=_parx, rest=_rx, apertura={},
-                                               camps=("", "", ""), intl=("", ""), n_anual=1, n_prom=1,
+                                               camps=(st.session_state.get("lpf_c1", "Belgrano"), "", ""), intl=("", ""), n_anual=1, n_prom=1,
                                                base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
                 st.success(f"Cargado de ESPN: Zona A ({len(_Zx.get('A',{}))}) y Zona B ({len(_Zx.get('B',{}))}) ✓")
                 st.rerun()
@@ -3408,6 +3414,12 @@ with st.sidebar:
             st.success("Histórico cargado: " + st.session_state.LPF_HIST_OK + " ✓")
         st.markdown("**Paso 2 — el Clausura de esta fecha**")
         if st.button("🇦🇷 Cargar Zonas A y B del Clausura 2026", use_container_width=True, type="primary"):
+            if not st.session_state.get("LPF_ANUAL"):
+                st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
+                _pv0 = parse_promedios_tabla(PROMEDIOS_LPF_2026)[0]
+                st.session_state.PROM_TXT = promedios_previas_texto(_pv0)
+                st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
+                st.session_state.LPF_HIST_OK = f"{len(st.session_state.LPF_ANUAL)} equipos en la anual · {len(_pv0)} en promedios"
             _bA, _avA = parse_tabla_anual(ZONA_A_LPF_2026)
             _bB, _avB = parse_tabla_anual(ZONA_B_LPF_2026)
             _Zc = {"A": canon_base(_bA), "B": canon_base(_bB)}
@@ -3416,7 +3428,7 @@ with st.sidebar:
             st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqc, zonas_lpf=_Zc,
                                            anual_directo=st.session_state.get("LPF_ANUAL") or {},
                                            pendientes=[], rest=_restc, apertura={},
-                                           camps=(st.session_state.get("lpf_c1", ""), st.session_state.get("lpf_c2", ""),
+                                           camps=(st.session_state.get("lpf_c1", "Belgrano"), st.session_state.get("lpf_c2", ""),
                                                   st.session_state.get("lpf_c3", "")),
                                            intl=("", ""), n_anual=1, n_prom=1,
                                            base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
@@ -3434,7 +3446,7 @@ with st.sidebar:
                        "así la tabla sigue viva fecha a fecha en vez de quedar congelada.")
             _ap = st.text_area("…o pegá la fase de zonas del APERTURA", height=90, key="lpf_ap",
                                placeholder="River Plate, 30, 16, +14\nBoca Juniors, 29, 16, +12\n…")
-            _c1 = st.text_input("Campeón del Apertura 2026", key="lpf_c1")
+            _c1 = st.text_input("Campeón del Apertura 2026", value=st.session_state.get("lpf_c1", "Belgrano"), key="lpf_c1")
             _c2 = st.text_input("Campeón del Clausura 2026 (si ya se definió)", key="lpf_c2")
             _c3 = st.text_input("Campeón de la Copa Argentina 2026", key="lpf_c3")
             _x1 = st.text_input("Campeón Libertadores 2026 (si es argentino)", key="lpf_x1",
@@ -3705,10 +3717,16 @@ if not st.session_state.ESTADO:
                 _rx = {}
                 for _lab, _bz in _Zx.items():
                     _rx.update(liga_restantes(list(_bz.keys()), _parx, None))
+                if not st.session_state.get("LPF_ANUAL"):
+                    st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
+                    _pv0 = parse_promedios_tabla(PROMEDIOS_LPF_2026)[0]
+                    st.session_state.PROM_TXT = promedios_previas_texto(_pv0)
+                    st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
+                    st.session_state.LPF_HIST_OK = f"{len(st.session_state.LPF_ANUAL)} equipos en la anual"
                 st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqx, zonas_lpf=_Zx,
                                                anual_directo=st.session_state.get("LPF_ANUAL") or {},
                                                pendientes=_parx, rest=_rx, apertura={},
-                                               camps=("", "", ""), intl=("", ""), n_anual=1, n_prom=1,
+                                               camps=(st.session_state.get("lpf_c1", "Belgrano"), "", ""), intl=("", ""), n_anual=1, n_prom=1,
                                                base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
                 st.rerun()
     with c2:
@@ -3885,6 +3903,8 @@ def _router_lpf(acc, E):
     if intent in ("octavos", "cruces", "duelos", "camino"):
         return [("md", lpf_cruces_texto(Z))]
     xl, xs = (E.get("intl") or ("", ""))
+    if intent == "copas" and not E.get("anual_directo"):
+        return [("warning", "Para las copas necesito la **Tabla Anual real**. Tocá «📦 Cargar Tabla Anual + Promedios» en el panel.")]
     if intent == "copas":
         if equipo:
             return [("md", lpf_copas_necesita_texto(equipo, Z, rest, ap, (c1, c2, c3), (xl, xs))),
@@ -3892,8 +3912,12 @@ def _router_lpf(acc, E):
         return [("md", lpf_copas_texto(Z, ap, c1, c2, c3, xl, xs)),
                 ("df", lpf_anual_df(Z, ap), "Tabla General 2026 (Apertura + Clausura)")]
     if intent == "anual":
-        return [("df", lpf_anual_df(Z, ap), "Tabla General 2026 (art. 24.1)"),
-                ("md", "_El 1º de esta tabla es el **Campeón de Liga 2026** (art. 24.2)._")]
+        out = [("df", lpf_anual_df(Z, ap), "Tabla General 2026 (art. 24.1)")]
+        if not E.get("anual_directo"):
+            out.insert(0, ("warning", "⚠️ Esto **no es la anual real**: es solo el Clausura. "
+                                      "Tocá «📦 Cargar Tabla Anual + Promedios» en el panel para sumarle el Apertura."))
+        out.append(("md", "_El 1º de esta tabla es el **Campeón de Liga 2026** (art. 24.2)._"))
+        return out
     if intent in ("promedios", "descenso"):
         out = [("md", lpf_descenso_texto(Z, rest, ap, prev, na, npro, equipo))]
         out.append(("df", promedios_df(anual, rest, prev), "Promedios (piso = perdiendo todo · techo = ganando todo)"))
