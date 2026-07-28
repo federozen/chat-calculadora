@@ -1916,10 +1916,10 @@ def _prom_rangos(base, rest, prev):
 
 def promedios_df(base, rest, prev):
     P = _prom_rangos(base, rest, prev)
-    rows = [{"Equipo": e, "Pts (total)": d["tp"], "PJ (total)": d["tj"], "Promedio": round(d["hoy"], 3),
+    rows = [{"Equipo": e, "PROMEDIO": round(d["hoy"], 3), "Pts": d["tp"], "PJ": d["tj"],
              "Piso": round(d["piso"], 3), "Techo": round(d["techo"], 3),
              "Previas": "sí" if d["con_prev"] else "solo actual"} for e, d in P.items()]
-    df = pd.DataFrame(rows).sort_values("Promedio", ascending=False).reset_index(drop=True)
+    df = pd.DataFrame(rows).sort_values("PROMEDIO", ascending=False).reset_index(drop=True)
     df.insert(0, "Pos", range(1, len(df) + 1))
     return df
 
@@ -3996,19 +3996,35 @@ def _router_lpf(acc, E):
 AYUDA_LPF = """**Calculadora LPF 2026 — qué podés preguntar**
 
 **Playoffs (top 8 de cada zona)**
-- *¿Qué necesita River para los playoffs?* — cuenta exacta, con los cruces mano a mano
+- *¿Qué necesita River para los playoffs?* — cuenta exacta, con los cruces mano a mano y el «por qué»
 - *Tabla* — las dos zonas con la línea de clasificación
 - *Octavos* / *cruces* — cómo quedarían los 8 partidos si terminara hoy
+- *Probabilidades* / *chances* — % de entrar a los playoffs por simulación (zona por zona)
+- *Máximos* — a cuánto puede llegar cada uno como techo
 
 **Descenso (anual + promedios)**
 - *Descenso* — quiénes se irían hoy por cada tabla
 - *¿Se salva Tigre?* / *promedio de Tigre* — análisis exacto por promedio y por anual
+- *Promedios* — la tabla con PROMEDIO, piso (perdiendo todo) y techo (ganando todo)
 
 **Copas**
 - *Copas* / *Libertadores* / *Sudamericana* — cómo quedarían las plazas 2027
+- *¿River llega a la Libertadores?* — tu puesto en la tabla **sin campeones**, que es la que vale
 - *Anual* — la Tabla General 2026 (define el Campeón de Liga)
 
-_Cargá las temporadas previas en el panel «📉 Promedios» para que el promedio sea el real._"""
+**Análisis de cada equipo**
+- *Ficha de River* — puesto, ritmo, DG, rivales que le quedan y dificultad
+- *Comparar River y Boca* — cara a cara (avisa si están en zonas distintas)
+- *Proyección* — con cuántos puntos termina cada uno si mantiene el ritmo
+- *Calendario* — qué tan bravo es el fixture que le queda a cada uno
+
+**Control de datos**
+- *¿Está actualizado?* — compara lo cargado con el calendario oficial del torneo
+- Después de casi cualquier respuesta: *¿por qué?* — te desarma la cuenta
+
+_Cargá el histórico con el botón del panel para que la anual y los promedios sean los reales.
+El árbol, la previa de la fecha y las placas del modo grupo no aplican acá: con 15 fechas por
+delante hay demasiados escenarios para enumerar (usá chances y proyección)._"""
 
 
 def _router_liga_tabla(acc, E):
