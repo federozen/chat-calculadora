@@ -1736,7 +1736,7 @@ def espn_lpf_zonas(liga="arg.1", timeout=30):
         lab = m.group(1) if m else ("A" if "A" not in Z else "B")
         while lab in Z:
             lab = "B" if lab == "A" else "A"
-        Z[lab] = base
+        Z[lab] = canon_base(base)
     return Z, None
 
 def traer_de_apify(token, actor, input_json, timeout=120):
@@ -2005,7 +2005,11 @@ def lpf_cruces_texto(Z):
     return "\n\n".join(L)
 
 def lpf_anual_base(Z, apertura=None):
-    """Tabla General 2026 (art. 24.1): puntos del Apertura + puntos del Clausura."""
+    """Tabla General 2026 (art. 24.1). Si se cargó la anual directa, se usa esa;
+    si no, suma Apertura + Clausura."""
+    directa = (st.session_state.get("ESTADO") or {}).get("anual_directo")
+    if directa:
+        return dict(directa)
     out = {}
     ap = apertura or {}
     claves = list(ap.keys())
@@ -2170,6 +2174,71 @@ def lpf_tabla_zonas_texto(Z):
         L.append("")
     return "\n\n".join(L)
 
+
+# ═══ Nombres canónicos de los 30 clubes de la LPF 2026 (evita que "River" y "River Plate" sean dos equipos) ═══
+LPF_CLUBES = {
+ "Argentinos Juniors": ["argentinos", "argentinos jrs", "aa argentinos juniors"],
+ "Aldosivi": ["aldosivi"],
+ "Atlético Tucumán": ["atl tucuman", "atletico tucuman", "tucuman", "ca tucuman"],
+ "Banfield": ["banfield", "ca banfield"],
+ "Barracas Central": ["barracas", "barracas central"],
+ "Belgrano": ["belgrano", "ca belgrano"],
+ "Boca Juniors": ["boca", "boca jrs", "boca juniors", "ca boca juniors"],
+ "Central Córdoba": ["central cordoba", "central cordoba sde", "ca central cordoba"],
+ "Defensa y Justicia": ["defensa", "defensa y justicia"],
+ "Deportivo Riestra": ["riestra", "deportivo riestra"],
+ "Estudiantes de La Plata": ["estudiantes", "estudiantes lp", "estudiantes de la plata", "edlp"],
+ "Estudiantes de Río Cuarto": ["estudiantes rc", "estudiantes de rio cuarto", "estudiantes (rc)"],
+ "Gimnasia La Plata": ["gimnasia", "gimnasia lp", "gimnasia y esgrima la plata", "gelp"],
+ "Gimnasia de Mendoza": ["gimnasia m", "gimnasia (m)", "gimnasia y esgrima de mendoza", "gimnasia mendoza"],
+ "Godoy Cruz": ["godoy cruz", "godoy"],
+ "Huracán": ["huracan", "ca huracan"],
+ "Independiente": ["independiente", "ca independiente"],
+ "Independiente Rivadavia": ["independiente riv", "independiente rivadavia", "ind rivadavia", "sportivo independiente rivadavia"],
+ "Instituto": ["instituto", "instituto atletico central cordoba"],
+ "Lanús": ["lanus", "ca lanus"],
+ "Newell's Old Boys": ["newells", "newell s old boys", "newells old boys", "noob"],
+ "Platense": ["platense", "ca platense"],
+ "Racing": ["racing", "racing club"],
+ "River Plate": ["river", "river plate", "ca river plate"],
+ "Rosario Central": ["central", "rosario central", "ca rosario central"],
+ "San Lorenzo": ["san lorenzo", "san lorenzo de almagro"],
+ "Sarmiento": ["sarmiento", "sarmiento junin"],
+ "Talleres": ["talleres", "talleres cordoba"],
+ "Tigre": ["tigre", "ca tigre"],
+ "Unión": ["union", "union santa fe"],
+ "Vélez Sarsfield": ["velez", "velez sarsfield", "ca velez sarsfield"],
+}
+def _norm_club(x):
+    t = _zlow(str(x or ""))
+    t = t.replace("'", "").replace("\u2019", "").replace(".", " ")
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+_LPF_LOOKUP = {}
+for _c, _als in LPF_CLUBES.items():
+    _LPF_LOOKUP[_norm_club(_c)] = _c
+    for _a in _als:
+        _LPF_LOOKUP[_norm_club(_a)] = _c
+
+def canon_club(nombre):
+    """Nombre canónico del club, venga de donde venga. Compara SIEMPRE el nombre completo primero,
+    para no confundir «Gimnasia (M)» con «Gimnasia» ni «Estudiantes RC» con «Estudiantes»."""
+    n = _norm_club(nombre)
+    if not n:
+        return nombre
+    if n in _LPF_LOOKUP:
+        return _LPF_LOOKUP[n]
+    sin_par = re.sub(r"\s*\([^)]*\)", " ", str(nombre or ""))
+    n2 = _norm_club(sin_par)
+    if n2 and n2 in _LPF_LOOKUP:
+        return _LPF_LOOKUP[n2]
+    cands = {c for k, c in _LPF_LOOKUP.items() if (k in n or n in k) and abs(len(k) - len(n)) <= 8}
+    return cands.pop() if len(cands) == 1 else str(nombre).strip()
+
+def canon_base(base):
+    return {canon_club(e): d for e, d in (base or {}).items()}
+
 def parse_promedios_tabla(texto, pj_actual=None):
     """Lee la tabla de promedios pegada (formato Promiedos: puesto / nombre / nombre /
     Prom Pts PJ y una columna por temporada). Devuelve (previas, pj_actual, avisos).
@@ -2205,7 +2274,7 @@ def parse_promedios_tabla(texto, pj_actual=None):
         c_act = f["temp"][-1] if f["temp"] else 0
         if f["temp"] and sum(f["temp"]) != f["pts"]:
             avisos.append(f"{f['eq']}: las columnas por temporada no suman los puntos totales; lo cargo igual.")
-        previas[f["eq"]] = (max(0, f["pts"] - c_act), max(0, f["pj"] - pj_actual))
+        previas[canon_club(f["eq"])] = (max(0, f["pts"] - c_act), max(0, f["pj"] - pj_actual))
     return previas, pj_actual, avisos
 
 def promedios_previas_texto(previas):
@@ -2333,6 +2402,102 @@ Estudiantes RC
 Estudiantes RC
 0.471\t8\t17\t0\t0\t8"""
 
+
+# Zonas del Clausura 2026 (fecha 2 en curso). Fuente: tablas pegadas por el usuario.
+ZONA_A_LPF_2026 = """1
+Gimnasia (M)
+4	2	1:0	1	1	1	0
+2
+Riestra
+3	1	3:0	3	1	0	0
+3
+Independiente
+3	1	2:0	2	1	0	0
+4
+Newell's
+3	1	1:0	1	1	0	0
+5
+Vélez
+3	1	1:0	1	1	0	0
+6
+Lanús
+3	1	1:0	1	1	0	0
+7
+Unión
+1	1	2:2	0	0	1	0
+8
+Platense
+1	1	2:2	0	0	1	0
+9
+Defensa
+1	1	1:1	0	0	1	0
+10
+San Lorenzo
+1	2	0:1	-1	0	1	1
+11
+Central Córdoba
+0	1	0:1	-1	0	0	1
+12
+Instituto
+0	1	0:1	-1	0	0	1
+13
+Talleres
+0	1	0:1	-1	0	0	1
+14
+Estudiantes
+0	1	0:2	-2	0	0	1
+15
+Boca Jrs.
+0	1	0:3	-3	0	0	1"""
+
+ZONA_B_LPF_2026 = """1
+Argentinos
+3	1	3:2	1	1	0	0
+2
+Belgrano
+3	1	2:1	1	1	0	0
+3
+Racing
+3	1	2:1	1	1	0	0
+4
+Huracán
+3	1	1:0	1	1	0	0
+5
+Estudiantes RC
+3	1	1:0	1	1	0	0
+6
+Barracas
+3	1	1:0	1	1	0	0
+7
+Aldosivi
+1	1	1:1	0	0	1	0
+8
+Atl. Tucumán
+1	1	0:0	0	0	1	0
+9
+Independiente Riv.
+1	1	0:0	0	0	1	0
+10
+Sarmiento
+1	2	2:3	-1	0	1	1
+11
+Banfield
+1	2	0:1	-1	0	1	1
+12
+Central
+0	1	1:2	-1	0	0	1
+13
+Gimnasia
+0	1	1:2	-1	0	0	1
+14
+River
+0	1	0:1	-1	0	0	1
+15
+Tigre
+0	1	0:1	-1	0	0	1"""
+
+LPF_FECHAS_TOTAL = 16  # fase de zonas del Clausura (art. 14.1)
+
 def parse_tabla_anual(texto):
     """Lee la Tabla Anual pegada (formato Promiedos: puesto / nombre / nombre / PTS J Gol +/- G E P).
     Devuelve (base, avisos) con base = {equipo: {pts, pj, dg, gf, ga}}."""
@@ -2352,9 +2517,11 @@ def parse_tabla_anual(texto):
                     avisos.append(f"{cand}: G+E+P no da los partidos jugados; lo cargo igual.")
                 elif pts != 3 * g + e:
                     avisos.append(f"{cand}: los puntos no coinciden con G/E; lo cargo igual.")
-            base[cand] = {"pts": pts, "pj": pj, "dg": dg, "gf": gf, "ga": ga}
+            base[canon_club(cand)] = {"pts": pts, "pj": pj, "dg": dg, "gf": gf, "ga": ga}
             cand = None
-        elif not re.fullmatch(r"\d+", t) and not _zlow(t).startswith(("tabla", "equipos", "#", "campeon", "conmebol", "descenso")):
+        elif (not re.fullmatch(r"[\d\-:\s]+", t)
+              and not _zlow(t).startswith(("tabla", "equipos", "#", "campeon", "conmebol", "descenso",
+                                           "grupo", "zona", "octavos", "live", "vivo", "pts"))):
             cand = t
     if not base:
         return {}, ["No pude leer la tabla anual. Pegala tal cual sale de Promiedos."]
@@ -3198,7 +3365,7 @@ with st.sidebar:
 
     # Cargar datos
     st.subheader("📥 Cargar datos")
-    modo_carga = st.radio("Fuente", ["🇦🇷 LPF 2026 (Clausura: zonas A y B)", "API ESPN (gratis, incluye Liga Argentina)", "API football-data.org", "Pegar resultados", "Pegar tabla + fixture (ligas)", "Importar JSON/CSV (Apify u otra fuente)"], label_visibility="collapsed")
+    modo_carga = st.radio("Fuente", ["🇦🇷 LPF 2026 (Clausura: zonas A y B)", "Otra liga / copa (avanzado)"], label_visibility="collapsed")
 
     if modo_carga == "🇦🇷 LPF 2026 (Clausura: zonas A y B)":
         st.caption("Reglamento LPF 2026: dos zonas de 15, una rueda, 16 fechas. Clasifican los **8 primeros de cada zona** "
@@ -3216,6 +3383,7 @@ with st.sidebar:
                 for _lab, _bz in _Zx.items():
                     _rx.update(liga_restantes(list(_bz.keys()), _parx, None))
                 st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqx, zonas_lpf=_Zx,
+                                               anual_directo=st.session_state.get("LPF_ANUAL") or {},
                                                pendientes=_parx, rest=_rx, apertura={},
                                                camps=("", "", ""), intl=("", ""), n_anual=1, n_prom=1,
                                                base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
@@ -3227,7 +3395,34 @@ with st.sidebar:
                            placeholder="Racing, 27, 12, +9\nIndependiente, 22, 12, +3\n…")
         _fx = st.text_area("Fixture que falta (opcional)", height=70, key="lpf_fx",
                            placeholder="faltan 4 fechas\n— o los partidos: River Plate vs Boca Juniors …")
-        with st.expander("📊 Tabla General / copas / descenso"):
+        st.markdown("**Paso 1 — histórico (una sola vez)**")
+        if st.button("📦 Cargar Tabla Anual + Promedios LPF 2026", use_container_width=True, type="secondary"):
+            _anual_b, _av1 = parse_tabla_anual(TABLA_ANUAL_LPF_2026)
+            _prev_b, _pja_b, _av2 = parse_promedios_tabla(PROMEDIOS_LPF_2026)
+            st.session_state.LPF_ANUAL = _anual_b
+            st.session_state.PROM_TXT = promedios_previas_texto(_prev_b)
+            st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
+            st.session_state.LPF_HIST_OK = f"{len(_anual_b)} equipos en la anual · {len(_prev_b)} en promedios"
+            st.rerun()
+        if st.session_state.get("LPF_HIST_OK"):
+            st.success("Histórico cargado: " + st.session_state.LPF_HIST_OK + " ✓")
+        st.markdown("**Paso 2 — el Clausura de esta fecha**")
+        if st.button("🇦🇷 Cargar Zonas A y B del Clausura 2026", use_container_width=True, type="primary"):
+            _bA, _avA = parse_tabla_anual(ZONA_A_LPF_2026)
+            _bB, _avB = parse_tabla_anual(ZONA_B_LPF_2026)
+            _Zc = {"A": canon_base(_bA), "B": canon_base(_bB)}
+            _eqc = [e for b in _Zc.values() for e in b]
+            _restc = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0)) for b in _Zc.values() for e, d in b.items()}
+            st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqc, zonas_lpf=_Zc,
+                                           anual_directo=st.session_state.get("LPF_ANUAL") or {},
+                                           pendientes=[], rest=_restc, apertura={},
+                                           camps=(st.session_state.get("lpf_c1", ""), st.session_state.get("lpf_c2", ""),
+                                                  st.session_state.get("lpf_c3", "")),
+                                           intl=("", ""), n_anual=1, n_prom=1,
+                                           base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
+            st.success(f"Zonas cargadas: A ({len(_Zc['A'])}) y B ({len(_Zc['B'])}) ✓")
+            st.rerun()
+        with st.expander("📊 Actualizar histórico a mano (opcional)"):
             if "lpf_anual_fetch" in st.session_state:
                 st.session_state["lpf_anual"] = st.session_state.pop("lpf_anual_fetch")
             if st.button("🇦🇷 Cargar Tabla Anual LPF 2026 (previa a la fecha 2)", use_container_width=True):
@@ -3254,7 +3449,8 @@ with st.sidebar:
             if len(_ba) < 3 or len(_bb) < 3:
                 st.error("Necesito las dos tablas (Zona A y Zona B), una línea por equipo: «Equipo, Pts, PJ, DG».")
             else:
-                _Z = {"A": _ba, "B": _bb}
+                _Z = {"A": canon_base(_ba), "B": canon_base(_bb)}
+                _ba, _bb = _Z["A"], _Z["B"]
                 if (_an or "").strip():
                     _anual, _avA = parse_tabla_anual(_an)
                     _bap, _avD = derivar_apertura(_anual, _Z)
@@ -3271,7 +3467,11 @@ with st.sidebar:
                 _rest = {}
                 for _lab, _bz in _Z.items():
                     _rest.update(liga_restantes(list(_bz.keys()), _pares, _gl))
+                _anual_dir = st.session_state.get("LPF_ANUAL") or {}
+                if (_an or "").strip():
+                    _anual_dir = parse_tabla_anual(_an)[0]
                 st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqs, zonas_lpf=_Z,
+                                               anual_directo=_anual_dir,
                                                pendientes=_pares, rest=_rest, apertura=_bap,
                                                camps=(_c1, _c2, _c3), intl=(_x1, _x2), n_anual=int(_na), n_prom=int(_np),
                                                base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
@@ -3279,7 +3479,7 @@ with st.sidebar:
                 st.rerun()
         texto_torneo = ""
 
-    elif modo_carga == "API ESPN (gratis, incluye Liga Argentina)":
+    elif modo_carga == "Otra liga / copa (avanzado)" and False and "API ESPN (gratis, incluye Liga Argentina)":
         st.caption("Gratis y sin token. Trae la **tabla** y los **partidos que faltan** (y las zonas sugeridas). "
                    "Para ligas que no estén en la lista, escribí el código (ej.: `bra.1`, `por.1`).")
         _lnom = st.selectbox("Liga", list(ESPN_LIGAS.keys()), key="espn_liga_sel")
@@ -3311,7 +3511,7 @@ with st.sidebar:
                 st.rerun()
         texto_torneo = ""
 
-    elif modo_carga == "API football-data.org":
+    elif modo_carga == "Otra liga / copa (avanzado)" and False and "API football-data.org":
         token = st.text_input("API Key", value=_secret("FOOTBALL_DATA_TOKEN", ""), type="password",
                                placeholder="Tu token de football-data.org",
                                help="Cargala una vez en Secrets (FOOTBALL_DATA_TOKEN) y queda precargada.")
@@ -3344,7 +3544,7 @@ with st.sidebar:
                 st.caption(f"`{code}` — {name}")
         texto_torneo = st.session_state.texto_torneo_cache
 
-    elif modo_carga == "Pegar tabla + fixture (ligas)":
+    elif modo_carga == "Otra liga / copa (avanzado)" and False and "Pegar tabla + fixture (ligas)":
         if "liga_tabla_fetch" in st.session_state:
             st.session_state["liga_tabla_txt"] = st.session_state.pop("liga_tabla_fetch")
         st.caption("Pegá la **tabla** (una línea por equipo: «Equipo, Pts, PJ, DG»). Abajo, lo ideal es pegar el **fixture** que viene (líneas «River vs Boca») para captar los cruces entre rivales; si no, poné «faltan N fechas» (atajo, no ve los cruces).")
@@ -3407,7 +3607,7 @@ with st.sidebar:
                 st.error("No pude leer la tabla. Probá el formato «Equipo, Pts, PJ, DG» (una línea por equipo).")
         texto_torneo = ""
 
-    elif modo_carga == "Importar JSON/CSV (Apify u otra fuente)":
+    elif modo_carga == "Otra liga / copa (avanzado)" and False and "Importar JSON/CSV (Apify u otra fuente)":
         st.caption("Para ligas que no están en la API. Reconoce `homeTeam/awayTeam/homeScore/awayScore/status/league`: "
                    "los terminados van como resultados y los programados como fixture.")
         imp_fil = st.text_input("Filtrar por liga (texto que contenga)", key="imp_fil",
@@ -3452,7 +3652,7 @@ with st.sidebar:
         texto_torneo = st.text_area(
             "Pegá los resultados",
             height=200,
-            placeholder="Grupo A\nEspaña 0-0 Cabo Verde\nUruguay 1-1 Arabia Saudita\n...",
+            placeholder="Grupo A\nRiver Plate 1-0 Boca Juniors\nRacing 1-1 Independiente\n...",
         )
         if texto_torneo.strip():
             st.session_state.texto_torneo_cache = texto_torneo
@@ -3506,6 +3706,7 @@ if not st.session_state.ESTADO:
                 for _lab, _bz in _Zx.items():
                     _rx.update(liga_restantes(list(_bz.keys()), _parx, None))
                 st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqx, zonas_lpf=_Zx,
+                                               anual_directo=st.session_state.get("LPF_ANUAL") or {},
                                                pendientes=_parx, rest=_rx, apertura={},
                                                camps=("", "", ""), intl=("", ""), n_anual=1, n_prom=1,
                                                base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
@@ -3604,32 +3805,32 @@ def _buscar_grupo_de(team_q):
 AYUDA_MD = """**Todo esto funciona escribiéndolo (no hace falta el asistente Claude).** Ejemplos:
 
 **Qué necesita cada uno**
-- *¿Qué necesita España?* · *¿Puede ser campeón Cabo Verde?* · *¿Qué necesita Arabia para no descender?*
-- *¿Qué le conviene a Uruguay?* (su resultado + qué hinchar en los otros partidos)
+- *¿Qué necesita River para los playoffs?* · *¿Puede salir campeón Racing?* · *¿Qué necesita Aldosivi para no descender?*
+- *¿Qué le conviene a Boca?* (su resultado + qué hinchar en los otros partidos)
 - *¿De quién depende?* (si cada equipo depende de sí mismo o necesita ayuda) · *Si terminara hoy*
 
 **Datos del grupo**
-- *Tabla* · *Panorama* · *Probabilidades* · *Número mágico de España* · *Máximos* · *Asegurados*
+- *Tabla* · *Panorama* · *Probabilidades* · *Número mágico de River* · *Máximos* · *Asegurados*
 
 **Buscar grupos** (con el torneo completo cargado)
-- *¿En qué grupo está Brasil?* · *Equipos del grupo C* · *¿Qué grupos hay?*
+- *¿En qué zona está Belgrano?* · *Equipos de la Zona A*
 
 **Placas visuales (se descargan como imagen)**
-- *Grilla de España* — qué necesita, en cuadro de colores
-- *Comparar España y Uruguay* — cara a cara
-- *España puede salir 1º* — cuándo termina en ese puesto
+- *Grilla de River* — qué necesita, en cuadro de colores
+- *Comparar River y Boca* — cara a cara
+- *River puede salir 1º* — cuándo termina en ese puesto
 - *Mapa del grupo* — mapa de calor de en qué puesto termina cada uno
-- *¿Cómo viene España?* — explicación didáctica de sus chances, con medidor (placa)
-- *Árbol de España* — flowchart si/entonces: gana → clasifica, empata → depende, etc. (placa)
+- *¿Cómo viene River?* — explicación didáctica de sus chances, con medidor (placa)
+- *Árbol de River* — flowchart si/entonces: gana → clasifica, empata → depende, etc. (placa)
 - *Qué se juega cada equipo* — un renglón por equipo de todo el grupo, para placa o copete (placa)
 - *Previa de la fecha* — qué define cada partido que falta y qué pasa con cada resultado (texto + placa)
 - *Proyección* — cuántos puntos junta cada uno si mantiene su ritmo (tabla)
-- *Ficha de España* — pts, ritmo, forma, racha, local/visitante, rivales que quedan y dificultad
+- *Ficha de River* — pts, ritmo, forma, racha, local/visitante, rivales que quedan y dificultad
 - *Forma* / *Racha* — tabla de últimos 5 · *De local y de visitante* — rendimiento por condición
 - *Calendario* — qué tan difícil es el fixture que le queda a cada uno
 - *Mejores terceros* — el tablero de los 12 terceros con la línea de corte (necesita el torneo completo; placa)
 - *Promedios* / *Promedio de X* — el descenso a la argentina, con piso, techo y análisis exacto (cargá las previas en el panel)
-- *Barras de España* — distribución de en qué puesto puede terminar (gráfico)
+- *Barras de River* — distribución de en qué puesto puede terminar (gráfico)
 - *Partido bisagra* — qué partido de los que faltan define más cosas
 - *Tabla por zonas* — para ligas: pinta la tabla por Libertadores/Sudamericana/descenso (configurá las zonas en el panel)
 
@@ -3641,9 +3842,9 @@ AYUDA_MD = """**Todo esto funciona escribiéndolo (no hace falta el asistente Cl
 - Sirve sobre: *qué necesita X*, *ya clasificó / quedó afuera*, *número mágico*, *cómo viene X*, *partido bisagra*.
 
 **Para la nota**
-- *Contame el escenario de Uruguay* · *Relato del grupo* — texto listo para publicar
+- *Contame el escenario de Boca* · *Relato de la zona* — texto listo para publicar
 
-Podés encadenar sin repetir el equipo: *«¿qué necesita Uruguay?»* y después *«¿y qué le conviene?»*.
+Podés encadenar sin repetir el equipo: *«¿qué necesita Boca?»* y después *«¿y qué le conviene?»*.
 Si preguntás por un equipo de otro grupo, **cambio solo** a ese grupo."""
 
 AYUDA_LIGA = """Esto es una **liga** (muchas fechas): trabajo **por puntos**. Comandos:
@@ -3662,7 +3863,7 @@ Si cargaste por **tabla + fechas**, con eso me alcanza para todas estas cuentas 
 Configurá las zonas con nombre en «🎨 Zonas con nombre» del panel."""
 
 BIENVENIDA = ("👋 Soy la **calculadora de escenarios**. Preguntame en lenguaje natural: "
-              "*«¿qué necesita España?»*, *«¿en qué grupo está Brasil?»*, *«equipos del grupo C»*, "
+              "*«¿qué necesita River para los playoffs?»*, *«¿cómo está el descenso?»*, *«copas 2027»*, "
               "*«tabla»*… Si no te acordás el grupo de un equipo, preguntá igual y lo busco. "
               "Escribí **ayuda** para ver todo.")
 
@@ -3707,7 +3908,7 @@ def _router_lpf(acc, E):
         if not ok:
             out.insert(0, ("warning", t))
         return out
-    if intent in ("playoffs", "necesita", "conviene", "numero_magico", "puesto_exacto", "chances", "relato", "depende"):
+    if intent in ("playoffs", "necesita", "conviene", "numero_magico", "puesto_exacto", "chances", "depende"):
         if not equipo:
             return [("warning", "Decime el equipo. Ej.: «qué necesita River para los playoffs».")]
         qn = _zlow(q)
@@ -3720,6 +3921,35 @@ def _router_lpf(acc, E):
         if lab:
             out.append(("df", liga_maxmin_df(Z[lab], rest), f"Zona {lab}: puntos máximos posibles"))
         return out
+    if intent == "proyeccion":
+        base_all = {}
+        for b in Z.values(): base_all.update(b)
+        return [("df", liga_proyeccion_df(base_all, rest), "Proyección del Clausura si cada uno mantiene su ritmo"),
+                ("md", "_Puntos de hoy + puntos por partido × fechas que faltan._")]
+    if intent in ("probabilidades", "chances_zona"):
+        out = []
+        for lab in sorted(Z):
+            out.append(("df", liga_probabilidades_df(Z[lab], rest, pend, LPF_ZONAS_PLAYOFF),
+                        f"Zona {lab}: chances de entrar a los playoffs (simulación)"))
+        out.append(("md", NOTA_MC_LIGA))
+        return out
+    if intent == "comparar":
+        e2 = acc.get("equipo2")
+        if e2 and e2 not in eqs:
+            e2 = detectar_equipo(e2, eqs)
+        if not equipo or not e2:
+            return [("warning", "Decime los dos equipos. Ej.: «comparar River y Boca».")]
+        la, lb = lpf_zona_de_equipo(equipo, Z), lpf_zona_de_equipo(e2, Z)
+        base_all = {}
+        for b in Z.values(): base_all.update(b)
+        out = [("df", liga_comparar_df(equipo, e2, base_all, rest, LPF_ZONAS_PLAYOFF), f"{equipo} (Zona {la}) vs {e2} (Zona {lb})")]
+        if la != lb:
+            out.append(("info", "Ojo: están en zonas distintas, así que compiten por lugares distintos."))
+        return out
+    if intent in ("arbol", "previa", "juega", "bisagra", "visual", "mapa", "barras", "puesto", "simulador", "relato"):
+        return [("info", "Esa vista necesita enumerar todos los marcadores posibles, y con 15 fechas por delante "
+                         "son demasiados escenarios. Para el Clausura usá: **chances** (simulación), **proyección**, "
+                         "**qué necesita X**, **octavos**, **descenso** o **copas**.")]
     if intent == "maximos":
         dfs = []
         for lab in sorted(Z):
@@ -3884,7 +4114,7 @@ def _explicar_porque(E):
         eq = detectar_equipo(equipo, eqs) or equipo
         nn = u.get("n") or DIRECTO()
         return [("md", "🔍 **Por qué:** " + _porque_pasar(eq, eqs, jug, esc, pen, nn))]
-    return [("info", "Preguntá algo concreto (ej.: «cómo viene España», «qué necesita España», «partido bisagra») y después «¿por qué?».")]
+    return [("info", "Preguntá algo concreto (ej.: «cómo viene River», «qué necesita River», «partido bisagra») y después «¿por qué?».")]
 
 
 def ejecutar_accion(acc):
@@ -3918,7 +4148,7 @@ def ejecutar_accion(acc):
 
     if intent == "ficha":
         if not equipo:
-            return [("warning", "¿De qué equipo? Ej.: «ficha de España».")]
+            return [("warning", "¿De qué equipo? Ej.: «ficha de River».")]
         return [("md", ficha_equipo_texto(equipo, eqs, jug, pen))]
     if intent == "forma":
         out = []
@@ -4024,7 +4254,7 @@ def ejecutar_accion(acc):
                 ("md", relato_grupo_texto(eqs, jug, esc, pen))]
     if intent == "visual":
         if not equipo:
-            return [("warning", "¿De qué equipo querés la grilla? Probá «grilla de España».")]
+            return [("warning", "¿De qué equipo querés la grilla? Probá «grilla de River».")]
         spec = spec_necesita(equipo, esc, pen)
         if not spec:
             return [("info", f"A {equipo} le queda más de un partido, así que la grilla sería enorme. Va el detalle en texto:"),
@@ -4040,16 +4270,16 @@ def ejecutar_accion(acc):
         return out
     if intent == "barras":
         if not equipo:
-            return [("warning", "¿De qué equipo? Ej.: «barras de España».")]
+            return [("warning", "¿De qué equipo? Ej.: «barras de River».")]
         return [_placa_png(barras_puesto_png(equipo, esc), f"barras_{equipo}.png")]
     if intent == "chances":
         if not equipo:
-            return [("warning", "¿De qué equipo querés ver las chances? Ej.: «¿cómo viene España?».")]
+            return [("warning", "¿De qué equipo querés ver las chances? Ej.: «¿cómo viene River?».")]
         return [_placa_png(placa_chances_png(equipo, eqs, jug, esc, pen), f"chances_{equipo}.png"),
                 ("md", chances_texto(equipo, eqs, jug, esc, pen))]
     if intent == "arbol":
         if not equipo:
-            return [("warning", "¿De qué equipo querés el árbol? Ej.: «árbol de España».")]
+            return [("warning", "¿De qué equipo querés el árbol? Ej.: «árbol de River».")]
         png = placa_arbol_png(equipo, eqs, jug, esc, pen)
         if not png:
             return [("info", f"{equipo} tiene demasiados partidos pendientes para un árbol claro; probá «qué necesita {equipo}».")]
@@ -4078,7 +4308,7 @@ def ejecutar_accion(acc):
     if intent == "comparar":
         e2 = acc.get("equipo2")
         if not (equipo and e2):
-            return [("warning", "Decime los dos equipos. Ej.: «comparar España y Uruguay».")]
+            return [("warning", "Decime los dos equipos. Ej.: «comparar River y Boca».")]
         if e2 not in eqs:
             e2 = detectar_equipo(e2, eqs)
         if not e2 or e2 == equipo:
@@ -4086,7 +4316,7 @@ def ejecutar_accion(acc):
         return [_placa(spec_comparar(equipo, e2, eqs, jug, esc, pen), f"comparar_{equipo}_{e2}.png")]
     if intent == "puesto":
         if not equipo:
-            return [("warning", "¿De qué equipo? Ej.: «España puede salir 1º».")]
+            return [("warning", "¿De qué equipo? Ej.: «River puede salir 1º».")]
         puesto = n or 1
         spec = spec_puesto(equipo, esc, pen, puesto)
         if not spec:
@@ -4098,7 +4328,7 @@ def ejecutar_accion(acc):
         return [("df", clasificado_eliminado(eqs, jug, pen, nn), f"Asegurados / sin chances (top {nn})")]
     if intent == "numero_magico":
         if not equipo:
-            return [("warning", "¿De qué equipo? Probá: «número mágico de España».")]
+            return [("warning", "¿De qué equipo? Probá: «número mágico de River».")]
         nn = 1 if objetivo == "campeon" else (n or DIRECTO())
         return [("md", numero_magico_texto(equipo, eqs, jug, pen, nn))]
 
@@ -4476,7 +4706,7 @@ _gs_tot = _tour_grupos()
 if len(_gs_tot) > 1:
     st.caption(f"✅ Tenés **{len(_gs_tot)} grupos** cargados ({', '.join(_gs_tot)}). "
                "Preguntá por **cualquier** equipo: si es de otro grupo, cambio solo. "
-               "Probá «¿en qué grupo está Brasil?» o «¿qué grupos hay?».")
+               "Probá «¿en qué zona está Belgrano?».")
 
 if "chat" not in st.session_state:
     st.session_state.chat = [{"role": "assistant", "blocks": [("md", BIENVENIDA)]}]
