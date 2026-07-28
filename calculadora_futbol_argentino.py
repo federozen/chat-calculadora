@@ -2670,8 +2670,20 @@ def lpf_estado_datos(Z, hoy=None):
     cargadas, mx = min(pjs), max(pjs)
     esperadas, total = lpf_fecha_esperada(hoy)
     detalle = f"fecha **{cargadas}** de {total}" + (f" (algunos van {mx}: hay partidos postergados)" if mx != cargadas else "")
+    import datetime as _dt
+    hoyd = hoy or _dt.date.today()
+    en_juego = None
+    for i, d in enumerate(LPF_FECHAS_CLAUSURA, 1):
+        fd = _dt.datetime.strptime(d, "%Y-%m-%d").date()
+        if 0 <= (fd - hoyd).days <= 2 and i > cargadas:
+            en_juego = i; break
     if cargadas >= esperadas:
-        return f"✅ Datos al día: tenés cargada la {detalle}.", True
+        base_ok = f"✅ Datos al día: tenés cargada la {detalle}."
+        if en_juego:
+            return (base_ok + f"\n\n🔴 **La fecha {en_juego} se está jugando en estos días.** "
+                    "Los partidos en curso todavía no están (o están con resultado parcial): "
+                    "actualizá las zonas cuando termine la fecha.", False)
+        return base_ok, True
     faltan = esperadas - cargadas
     return (f"⚠️ **Datos desactualizados**: tenés la {detalle}, pero según el calendario oficial "
             f"ya se jugaron **{esperadas}**. Te faltan **{faltan}** fecha(s) por cargar — los resultados "
