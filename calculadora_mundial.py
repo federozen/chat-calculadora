@@ -1575,43 +1575,190 @@ def tabla_desde_url(url):
             if c in nombres:
                 return i
         return None
-    mejor, mejor_score = None, -1
-    for t in tablas:
+    def _extraer(t):
         cols = _cols(t)
         i_pts = _busca(cols, {"pts", "pts.", "puntos"})
-        i_pj = _busca(cols, {"pj", "j", "jug", "jj", "part"})
+        i_pj = _busca(cols, {"pj", "j", "jug", "jj", "part", "pj."})
         i_dg = _busca(cols, {"dg", "dif", "dif.", "+/-", "dif. de gol", "dg.", "dif de gol"})
         i_eq = _busca(cols, {"equipo", "club", "team", "equipos"})
         if i_eq is None:
             for i in range(len(cols)):
                 if t.dtypes.iloc[i] == object:
                     i_eq = i; break
-        score = (i_pts is not None) * 4 + (i_pj is not None) * 2 + (i_dg is not None) + (len(t) >= 6)
-        if i_pts is not None and i_eq is not None and score > mejor_score:
-            mejor, mejor_score = (t, i_eq, i_pts, i_pj, i_dg), score
-    if not mejor:
-        return "", "No encontré una tabla con columna de puntos. Probá con la página de Wikipedia del torneo."
-    t, i_eq, i_pts, i_pj, i_dg = mejor
-    lineas = []
-    for _, row in t.iterrows():
-        raw = str(row.iloc[i_eq]).strip()
-        name = re.sub(r"\s*\[[^\]]*\]", "", raw)
-        name = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip()
-        if not name or name.lower() in ("nan", "equipo", "club"):
-            continue
-        def _num(i, defecto=0):
-            if i is None: return defecto
-            m = re.search(r"[+-]?\d+", str(row.iloc[i]))
-            return int(m.group()) if m else None
-        pts = _num(i_pts, None)
-        if pts is None:
-            continue
-        pj = _num(i_pj, 0) or 0
-        dg = _num(i_dg, 0) or 0
-        lineas.append(f"{name}, {pts}, {pj}, {dg:+d}")
-    if len(lineas) < 4:
-        return "", "Leí la tabla pero con muy pocos equipos válidos. Revisá la URL."
-    return "\n".join(lineas), None
+        if i_pts is None or i_eq is None:
+            return []
+        out = []
+        for _, row in t.iterrows():
+            raw = str(row.iloc[i_eq]).strip()
+            name = re.sub(r"\s*\[[^\]]*\]", "", raw)
+            name = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip()
+            if not name or name.lower() in ("nan", "equipo", "club", "equipos"):
+                continue
+            def _num(i):
+                if i is None: return None
+                m = re.search(r"[+-]?\d+", str(row.iloc[i]))
+                return int(m.group()) if m else None
+            pts = _num(i_pts)
+            if pts is None:
+                continue
+            pj = _num(i_pj) or 0
+            dg = _num(i_dg) or 0
+            out.append(f"{name}, {pts}, {pj}, {dg:+d}")
+        return out
+    mejor = []
+    for t in tablas:
+        try:
+            lineas = _extraer(t)
+        except Exception:
+            lineas = []
+        if len(lineas) > len(mejor):
+            mejor = lineas
+    if len(mejor) < 4:
+        return "", ("Leí la página pero no encontré una tabla de posiciones con filas cargadas. "
+                    "En algunos torneos (como la Liga Argentina por zonas) Wikipedia no trae esas tablas en el HTML: "
+                    "usá la tabla acumulada o de promedios, o pegá la tabla a mano.")
+    return "\n".join(mejor), None
+
+# ═══ API ESPN (gratis, sin token) — incluye Liga Argentina y ligas que no están en football-data ═══
+
+ESPN_LIGAS = {
+    "Argentina · Liga Profesional": "arg.1",
+    "Argentina · Copa Argentina": "arg.copa",
+    "Inglaterra · Premier League": "eng.1",
+    "España · LaLiga": "esp.1",
+    "Italia · Serie A": "ita.1",
+    "Alemania · Bundesliga": "ger.1",
+    "Francia · Ligue 1": "fra.1",
+    "EE.UU. · MLS": "usa.1",
+    "México · Liga MX": "mex.1",
+    "Copa Libertadores": "conmebol.libertadores",
+    "Copa Sudamericana": "conmebol.sudamericana",
+    "Champions League": "uefa.champions",
+    "Mundial FIFA": "fifa.world",
+}
+
+def _espn_get(url, timeout=30):
+    import requests as _rq
+    r = _rq.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
+    if r.status_code >= 400:
+        raise RuntimeError(f"ESPN respondió {r.status_code}")
+    return r.json()
+
+def espn_tabla(liga, timeout=30):
+    """Tabla de posiciones desde ESPN. Devuelve (base, zonas_sugeridas_txt, error)."""
+    lg = (liga or "").strip()
+    if not lg:
+        return {}, "", "Indicá el código de liga (ej.: arg.1)."
+    try:
+        data = _espn_get(f"https://site.api.espn.com/apis/v2/sports/soccer/{lg}/standings", timeout)
+    except Exception as e:
+        return {}, "", f"No pude conectar con ESPN: {e}"
+    base, notas = {}, {}
+    def _walk(node):
+        if isinstance(node, dict):
+            std = node.get("standings")
+            if isinstance(std, dict) and isinstance(std.get("entries"), list):
+                for ent in std["entries"]:
+                    nm = (ent.get("team") or {}).get("displayName")
+                    if not nm:
+                        continue
+                    sv = {}
+                    for s in ent.get("stats", []) or []:
+                        try:
+                            sv[s.get("name")] = int(float(s.get("value", 0) or 0))
+                        except Exception:
+                            pass
+                    base[nm] = {"pts": sv.get("points", 0), "pj": sv.get("gamesPlayed", 0),
+                                "dg": sv.get("pointDifferential", 0),
+                                "gf": sv.get("pointsFor", 0), "ga": sv.get("pointsAgainst", 0)}
+                    nota = (ent.get("note") or {}).get("description")
+                    rk = sv.get("rank", 0)
+                    if nota and rk:
+                        notas.setdefault(nota, []).append(rk)
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                _walk(v)
+    _walk(data)
+    if not base:
+        return {}, "", f"ESPN no devolvió tabla para «{lg}». Revisá el código de liga."
+    _TR = {"relegation": "Descenso", "relegation playoff": "Promoción", "champions league": "Libertadores/Champions",
+           "europa league": "Sudamericana/Europa", "conference league": "Conference",
+           "conference league playoff round": "Playoff Conference", "promotion": "Ascenso",
+           "playoffs": "Playoffs", "championship round": "Ronda campeonato"}
+    def _tr(n):
+        return _TR.get(_zlow(n).strip(), n)
+    zonas = "\n".join(f"{max(rs)} {_tr(n)}" for n, rs in sorted(notas.items(), key=lambda kv: max(kv[1])))
+    return base, zonas, None
+
+def espn_fixture(liga, dias=120, timeout=30, max_req=30):
+    """Partidos desde ESPN en una ventana de días. Devuelve (jugados, pendientes, nota, error)."""
+    import datetime as _dt
+    lg = (liga or "").strip()
+    try:
+        cab = _espn_get(f"https://site.api.espn.com/apis/site/v2/sports/soccer/{lg}/scoreboard", timeout)
+    except Exception as e:
+        return [], [], "", f"No pude conectar con ESPN: {e}"
+    hoy = _dt.date.today(); fin = hoy + _dt.timedelta(days=int(dias))
+    cal = []
+    try:
+        for d in (cab.get("leagues") or [{}])[0].get("calendar", []) or []:
+            try:
+                f = _dt.datetime.strptime(str(d)[:10], "%Y-%m-%d").date()
+                if hoy <= f <= fin:
+                    cal.append(f)
+            except Exception:
+                pass
+    except Exception:
+        cal = []
+    jug, pen, vistos = [], [], set()
+    def _absorber(js):
+        for ev in js.get("events", []) or []:
+            eid = ev.get("id")
+            if eid in vistos:
+                continue
+            comp = (ev.get("competitions") or [{}])[0]
+            cs = comp.get("competitors") or []
+            loc = next((c for c in cs if c.get("homeAway") == "home"), None)
+            vis = next((c for c in cs if c.get("homeAway") == "away"), None)
+            if not loc or not vis:
+                continue
+            ln = (loc.get("team") or {}).get("displayName"); vn = (vis.get("team") or {}).get("displayName")
+            if not ln or not vn:
+                continue
+            vistos.add(eid)
+            t = ((comp.get("status") or {}).get("type") or {})
+            estado = str(t.get("state", "")).lower(); done = bool(t.get("completed"))
+            nm = str(t.get("name", "")).upper()
+            if "POSTPON" in nm or "CANCEL" in nm or "ABANDON" in nm:
+                continue
+            if done or estado == "post":
+                try:
+                    jug.append((ln, vn, int(loc.get("score")), int(vis.get("score"))))
+                except Exception:
+                    pass
+            elif estado in ("pre", "in"):
+                pen.append((ln, vn))
+    url_r = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{lg}/scoreboard?dates={hoy:%Y%m%d}-{fin:%Y%m%d}"
+    nota = ""
+    try:
+        _absorber(_espn_get(url_r, timeout))
+    except Exception:
+        pass
+    if not pen and cal:
+        usar = cal[:max_req]
+        if len(cal) > max_req:
+            nota = f"(limité a las próximas {max_req} fechas del calendario)"
+        for f in usar:
+            try:
+                _absorber(_espn_get(f"https://site.api.espn.com/apis/site/v2/sports/soccer/{lg}/scoreboard?dates={f:%Y%m%d}", timeout))
+            except Exception:
+                pass
+    if not jug and not pen:
+        return [], [], "", ("ESPN no devolvió partidos en esa ventana. Probá ampliar los días "
+                            "o revisá el código de liga.")
+    return jug, pen, nota, None
 
 def traer_de_apify(token, actor, input_json, timeout=120):
     """Corre un actor de Apify en modo sync y devuelve los items del dataset (lista de dicts)."""
@@ -2568,11 +2715,41 @@ with st.sidebar:
 
     # Cargar datos
     st.subheader("📥 Cargar datos")
-    modo_carga = st.radio("Fuente", ["API football-data.org", "Pegar resultados", "Pegar tabla + fixture (ligas)", "Importar JSON/CSV (Apify u otra fuente)"], label_visibility="collapsed")
+    modo_carga = st.radio("Fuente", ["API ESPN (gratis, incluye Liga Argentina)", "API football-data.org", "Pegar resultados", "Pegar tabla + fixture (ligas)", "Importar JSON/CSV (Apify u otra fuente)"], label_visibility="collapsed")
 
-    texto_torneo = ""
+    if modo_carga == "API ESPN (gratis, incluye Liga Argentina)":
+        st.caption("Gratis y sin token. Trae la **tabla** y los **partidos que faltan** (y las zonas sugeridas). "
+                   "Para ligas que no estén en la lista, escribí el código (ej.: `bra.1`, `por.1`).")
+        _lnom = st.selectbox("Liga", list(ESPN_LIGAS.keys()), key="espn_liga_sel")
+        _lcod = st.text_input("Código de liga", value=ESPN_LIGAS.get(_lnom, "arg.1"), key="espn_liga_cod")
+        _ldias = st.number_input("Traer partidos de los próximos (días)", 7, 365, 120, key="espn_dias")
+        if st.button("⚽ Traer de ESPN y cargar", use_container_width=True, type="primary"):
+            with st.spinner("Consultando ESPN…"):
+                _base, _zon, _err = espn_tabla(_lcod)
+            if _err:
+                st.error(_err)
+            else:
+                with st.spinner("Buscando los partidos que faltan…"):
+                    _jg, _pd, _nota, _errf = espn_fixture(_lcod, _ldias)
+                _eqs = list(_base.keys())
+                _pares, _caidos = mapear_fixture(_pd or [], _eqs)
+                _rest = liga_restantes(_eqs, _pares, None) if _pares else {e: 0 for e in _eqs}
+                st.session_state.ESTADO = dict(modo="liga_tabla", equipos=_eqs, base=_base,
+                                               pendientes=_pares, rest=_rest, gleft=None,
+                                               jugados=[], esc=None, mg=0, solo_puntos=True)
+                if _zon and not st.session_state.get("ZONAS"):
+                    st.session_state.ZONAS_TXT = _zon
+                    st.session_state.ZONAS = parse_zonas(_zon)
+                _msg = f"Cargado de ESPN: {len(_eqs)} equipos · {len(_pares)} partidos por jugar"
+                if _errf and not _pares:
+                    _msg += " (sin fixture: revisá los días o pegalo a mano)"
+                st.success(_msg + f" {_nota} ✓")
+                if _caidos:
+                    st.caption("Sin emparejar: " + ", ".join(_caidos[:3]) + ("…" if len(_caidos) > 3 else ""))
+                st.rerun()
+        texto_torneo = ""
 
-    if modo_carga == "API football-data.org":
+    elif modo_carga == "API football-data.org":
         token = st.text_input("API Key", value=_secret("FOOTBALL_DATA_TOKEN", ""), type="password",
                                placeholder="Tu token de football-data.org",
                                help="Cargala una vez en Secrets (FOOTBALL_DATA_TOKEN) y queda precargada.")
@@ -2610,6 +2787,22 @@ with st.sidebar:
             st.session_state["liga_tabla_txt"] = st.session_state.pop("liga_tabla_fetch")
         st.caption("Pegá la **tabla** (una línea por equipo: «Equipo, Pts, PJ, DG»). Abajo, lo ideal es pegar el **fixture** que viene (líneas «River vs Boca») para captar los cruces entre rivales; si no, poné «faltan N fechas» (atajo, no ve los cruces).")
         with st.expander("🌐 Traer la tabla desde una URL (Wikipedia, gratis)"):
+            _LIGAS = {
+                "— elegir —": "",
+                "Argentina · Tabla acumulada (copas + un descenso)": "https://es.wikipedia.org/wiki/Campeonato_de_Primera_División_2025_(Argentina)",
+                "Argentina · Tabla de promedios (descenso)": "https://es.wikipedia.org/wiki/Campeonato_de_Primera_División_2025_(Argentina)",
+                "Premier League (Inglaterra)": "https://es.wikipedia.org/wiki/Premier_League_2025-26",
+                "La Liga (España)": "https://es.wikipedia.org/wiki/Primera_División_de_España_2025-26",
+                "Serie A (Italia)": "https://es.wikipedia.org/wiki/Serie_A_2025-26",
+                "Brasileirão (Brasil)": "https://es.wikipedia.org/wiki/Campeonato_Brasileño_de_Serie_A_2025",
+            }
+            _lsel = st.selectbox("Liga (rellena el link solo)", list(_LIGAS.keys()), key="liga_preset")
+            if _LIGAS.get(_lsel) and st.session_state.get("_lsel_last") != _lsel:
+                st.session_state["url_tabla"] = _LIGAS[_lsel]
+                st.session_state["_lsel_last"] = _lsel
+                st.rerun()
+            st.caption("Ojo Argentina: la acumulada y la de promedios se leen bien; el fixture de la fecha se pega aparte "
+                       "(o vía Apify). El torneo en curso por zonas no trae partidos legibles desde Wikipedia.")
             url_tabla = st.text_input("URL de la página con la tabla", key="url_tabla",
                                       placeholder="https://es.wikipedia.org/wiki/Torneo_… (página del torneo)")
             if st.button("Leer tabla de la URL", use_container_width=True):
