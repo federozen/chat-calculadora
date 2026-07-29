@@ -2195,10 +2195,11 @@ LPF_CLUBES = {
  "Central Córdoba": ["central cordoba", "central cordoba sde", "ca central cordoba"],
  "Defensa y Justicia": ["defensa", "defensa y justicia"],
  "Deportivo Riestra": ["riestra", "deportivo riestra"],
- "Estudiantes de La Plata": ["estudiantes", "estudiantes lp", "estudiantes de la plata", "edlp"],
+ "Estudiantes de La Plata": ["estudiantes", "estudiantes lp", "estudiantes de la plata", "edlp", "estudiantes (la plata)"],
  "Estudiantes de Río Cuarto": ["estudiantes rc", "estudiantes de rio cuarto", "estudiantes (rc)", "estudiantes rio cuarto",
                               "estudiantes (río cuarto)", "estudiantes (rio cuarto)"],
- "Gimnasia La Plata": ["gimnasia", "gimnasia lp", "gimnasia y esgrima la plata", "gelp"],
+ "Gimnasia La Plata": ["gimnasia", "gimnasia lp", "gimnasia y esgrima la plata", "gelp",
+                      "gimnasia la plata", "gimnasia (la plata)", "gimnasia y esgrima"],
  "Gimnasia de Mendoza": ["gimnasia m", "gimnasia (m)", "gimnasia y esgrima de mendoza", "gimnasia mendoza",
                          "gimnasia mza", "gimnasia (mza)", "gimnasia (mza )", "gimnasia de mza", "gimnasia y esgrima mendoza"],
  "Godoy Cruz": ["godoy cruz", "godoy"],
@@ -2244,12 +2245,11 @@ def canon_club(nombre):
     if n_llano and n_llano in _LPF_LOOKUP:
         return _LPF_LOOKUP[n_llano]
     # recién al final probamos sin el paréntesis, y solo si no era un desambiguador
-    par = re.findall(r"\(([^)]*)\)", str(nombre or ""))
-    if not par:
-        sin_par = str(nombre or "")
-        n2 = _norm_club(sin_par)
-        if n2 and n2 in _LPF_LOOKUP:
-            return _LPF_LOOKUP[n2]
+    # sin el paréntesis: se permite salvo en los nombres que tienen "hermano" (Gimnasia, Estudiantes, etc.)
+    _AMBIGUOS = {"gimnasia", "estudiantes", "independiente", "central", "atletico tucuman"}
+    n2 = _norm_club(re.sub(r"\s*\([^)]*\)", " ", str(nombre or "")))
+    if n2 and n2 not in _AMBIGUOS and n2 in _LPF_LOOKUP:
+        return _LPF_LOOKUP[n2]
     cands = {c for k, c in _LPF_LOOKUP.items() if (k in n or n in k) and abs(len(k) - len(n)) <= 8}
     return cands.pop() if len(cands) == 1 else str(nombre).strip()
 
@@ -4062,22 +4062,26 @@ AYUDA_LPF = """**Calculadora LPF 2026 — qué podés preguntar**
 - *Octavos* / *cruces* — cómo quedarían los 8 partidos si terminara hoy
 - *Probabilidades* / *chances* — % de entrar a los playoffs por simulación (zona por zona)
 - *Máximos* — a cuánto puede llegar cada uno como techo
+- También entiende: *¿quién clasifica hoy?* · *¿cuántos puntos necesita Boca?* · *¿está eliminado X?* · *¿puede clasificar X?*
 
 **Descenso (anual + promedios)**
 - *Descenso* — quiénes se irían hoy por cada tabla
 - *¿Se salva Tigre?* / *promedio de Tigre* — análisis exacto por promedio y por anual
 - *Promedios* — la tabla con PROMEDIO, piso (perdiendo todo) y techo (ganando todo)
+- También entiende: *¿quién se salva?* · *¿quién está en riesgo?* · *¿quién se va hoy?*
 
 **Copas**
 - *Copas* / *Libertadores* / *Sudamericana* — cómo quedarían las plazas 2027
 - *¿River llega a la Libertadores?* — tu puesto en la tabla **sin campeones**, que es la que vale
 - *Anual* — la Tabla General 2026 (define el Campeón de Liga)
+- También entiende: *¿quién juega la Libertadores?* · *¿quiénes van a la Sudamericana?*
 
 **Análisis de cada equipo**
 - *Ficha de River* — puesto, ritmo, DG, rivales que le quedan y dificultad
 - *Comparar River y Boca* — cara a cara (avisa si están en zonas distintas)
 - *Proyección* — con cuántos puntos termina cada uno si mantiene el ritmo
 - *Calendario* — qué tan bravo es el fixture que le queda a cada uno
+- *¿Contra quién juega River?* — los rivales que le quedan
 
 **Control de datos**
 - *¿Está actualizado?* — compara lo cargado con el calendario oficial del torneo\n- *Estado de la fecha* / *en vivo* — quién ya jugó y está tomado, quién no, y los partidos de hoy según ESPN
@@ -4577,6 +4581,16 @@ def _parse_kw(q):
         tcam = detectar_equipo(q, _allt) or ("Argentina" if "Argentina" in _allt else None)
     if has("visual", "grilla", "matriz", "cuadro de escenarios", "mapa de escenarios", "tabla de escenarios", "grafic", "placa"):
         return {"intent": "visual", "equipo": team}
+    if has("quien clasifica", "quienes clasifican", "quien entra", "quienes entran", "clasificados hoy", "como esta la zona"):
+        return {"intent": "tabla"}
+    if has("quien se salva", "quien esta en riesgo", "quienes estan en riesgo", "quien peligra", "zona de descenso", "quien se va"):
+        return {"intent": "descenso", "equipo": team}
+    if has("quien juega la libertadores", "quienes van a la libertadores", "quien va a la sudamericana", "cupos de copa"):
+        return {"intent": "copas", "equipo": team}
+    if has("cuantos puntos necesita", "cuanto le falta", "cuantos puntos le faltan", "que le falta", "puede clasificar", "esta eliminado", "sigue con chances"):
+        return {"intent": "playoffs", "equipo": team}
+    if has("contra quien juega", "quienes le quedan", "que rivales", "quien le queda"):
+        return {"intent": "ficha", "equipo": team}
     if has("estado de la fecha", "como se juega esta fecha", "ultimos resultados", "resultados en vivo",
            "que esta cargado", "quien ya jugo", "que falta jugar", "partidos de hoy", "en vivo"):
         return {"intent": "estado_fecha"}
