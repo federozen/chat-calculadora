@@ -1630,7 +1630,7 @@ def espn_fixture(liga, dias=120, timeout=30, max_req=30):
         cab = _espn_get(f"https://site.api.espn.com/apis/site/v2/sports/soccer/{lg}/scoreboard", timeout)
     except Exception as e:
         return [], [], "", f"No pude conectar con ESPN: {e}"
-    hoy = _dt.date.today(); fin = hoy + _dt.timedelta(days=int(dias))
+    hoy = _dt.date.today() - _dt.timedelta(days=3); fin = _dt.date.today() + _dt.timedelta(days=int(dias))
     cal = []
     try:
         for d in (cab.get("leagues") or [{}])[0].get("calendar", []) or []:
@@ -2196,9 +2196,11 @@ LPF_CLUBES = {
  "Defensa y Justicia": ["defensa", "defensa y justicia"],
  "Deportivo Riestra": ["riestra", "deportivo riestra"],
  "Estudiantes de La Plata": ["estudiantes", "estudiantes lp", "estudiantes de la plata", "edlp"],
- "Estudiantes de Río Cuarto": ["estudiantes rc", "estudiantes de rio cuarto", "estudiantes (rc)"],
+ "Estudiantes de Río Cuarto": ["estudiantes rc", "estudiantes de rio cuarto", "estudiantes (rc)", "estudiantes rio cuarto",
+                              "estudiantes (río cuarto)", "estudiantes (rio cuarto)"],
  "Gimnasia La Plata": ["gimnasia", "gimnasia lp", "gimnasia y esgrima la plata", "gelp"],
- "Gimnasia de Mendoza": ["gimnasia m", "gimnasia (m)", "gimnasia y esgrima de mendoza", "gimnasia mendoza"],
+ "Gimnasia de Mendoza": ["gimnasia m", "gimnasia (m)", "gimnasia y esgrima de mendoza", "gimnasia mendoza",
+                         "gimnasia mza", "gimnasia (mza)", "gimnasia (mza )", "gimnasia de mza", "gimnasia y esgrima mendoza"],
  "Godoy Cruz": ["godoy cruz", "godoy"],
  "Huracán": ["huracan", "ca huracan"],
  "Independiente": ["independiente", "ca independiente"],
@@ -2237,10 +2239,17 @@ def canon_club(nombre):
         return nombre
     if n in _LPF_LOOKUP:
         return _LPF_LOOKUP[n]
-    sin_par = re.sub(r"\s*\([^)]*\)", " ", str(nombre or ""))
-    n2 = _norm_club(sin_par)
-    if n2 and n2 in _LPF_LOOKUP:
-        return _LPF_LOOKUP[n2]
+    # variante conservando lo que hay entre paréntesis: "Gimnasia (Mza.)" -> "gimnasia mza"
+    n_llano = _norm_club(re.sub(r"[()]", " ", str(nombre or "")))
+    if n_llano and n_llano in _LPF_LOOKUP:
+        return _LPF_LOOKUP[n_llano]
+    # recién al final probamos sin el paréntesis, y solo si no era un desambiguador
+    par = re.findall(r"\(([^)]*)\)", str(nombre or ""))
+    if not par:
+        sin_par = str(nombre or "")
+        n2 = _norm_club(sin_par)
+        if n2 and n2 in _LPF_LOOKUP:
+            return _LPF_LOOKUP[n2]
     cands = {c for k, c in _LPF_LOOKUP.items() if (k in n or n in k) and abs(len(k) - len(n)) <= 8}
     return cands.pop() if len(cands) == 1 else str(nombre).strip()
 
