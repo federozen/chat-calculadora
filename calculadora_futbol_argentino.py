@@ -1643,6 +1643,7 @@ def espn_fixture(liga, dias=120, timeout=30, max_req=30):
     except Exception:
         cal = []
     jug, pen, vistos = [], [], set()
+    globals()["_ESPN_DIA"] = globals().get("_ESPN_DIA") or {}
     def _absorber(js):
         for ev in js.get("events", []) or []:
             eid = ev.get("id")
@@ -1658,6 +1659,12 @@ def espn_fixture(liga, dias=120, timeout=30, max_req=30):
             if not ln or not vn:
                 continue
             vistos.add(eid)
+            try:
+                _d = str(ev.get("date") or comp.get("date") or "")[:10]
+                if _d:
+                    globals()["_ESPN_DIA"][(ln, vn)] = _d
+            except Exception:
+                pass
             t = ((comp.get("status") or {}).get("type") or {})
             estado = str(t.get("state", "")).lower(); done = bool(t.get("completed"))
             nm = str(t.get("name", "")).upper()
@@ -2163,8 +2170,12 @@ def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""),
     L = [f"**{equipo} y las copas 2027** (por Tabla General)",
          f"En la anual está {P['orden'].index(equipo)+1}º, pero para las copas lo que vale es la **tabla sin los campeones**: "
          f"ahí está **{pos_red}º**, y por esta vía entran **{n_t} a Libertadores** y los **6 siguientes a Sudamericana**."]
-    L.append(liga_que_necesita_texto(equipo, base_red, rest, zonas, "libertadores"))
-    L.append(liga_que_necesita_texto(equipo, base_red, rest, zonas, "sudamericana"))
+    _nag = "_Cuenta por puntos asumiendo que los rivales ganan todo lo suyo (piso seguro). Pegá el **fixture** para ver tus cruces directos._"
+    _nota_copas = ("_Piso seguro: asume que cada rival gana todo lo que le queda. En la anual competís contra los 30, "
+                   "pero solo enfrentás a 16, así que en la práctica el número real suele ser menor._")
+    for _obj in ("libertadores", "sudamericana"):
+        _t = liga_que_necesita_texto(equipo, base_red, rest, zonas, _obj)
+        L.append(_t.replace(_nag, _nota_copas))
     if P["avisos"]:
         L.append("_Ojo: " + " ".join(P["avisos"]) + "_")
     return "\n\n".join(L)
@@ -2704,6 +2715,26 @@ def lpf_estado_datos(Z, hoy=None):
             f"ya se jugaron **{esperadas}**. Te faltan **{faltan}** fecha(s) por cargar — los resultados "
             f"que no cargues **no se toman**, y las cuentas de playoffs, descenso y copas van a salir viejas."), False
 
+def lpf_jornada_de_dia(dia):
+    """Convierte la fecha de un partido en el número de jornada, con el calendario del reglamento."""
+    import datetime as _dt
+    try:
+        d = _dt.datetime.strptime(str(dia)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+    mejor, dif = None, 99
+    for i, f in enumerate(LPF_FECHAS_CLAUSURA, 1):
+        fd = _dt.datetime.strptime(f, "%Y-%m-%d").date()
+        dd = abs((d - fd).days)
+        if dd < dif:
+            mejor, dif = i, dd
+    return mejor if dif <= 5 else None
+
+def _etiq(a, b):
+    d = (globals().get("_ESPN_DIA") or {}).get((a, b))
+    j = lpf_jornada_de_dia(d) if d else None
+    return f" _(f{j})_" if j else ""
+
 def lpf_estado_fecha_texto(Z, liga="arg.1", con_vivo=True):
     """Qué está tomado y qué no: por PJ de cada equipo, más los partidos de hoy según ESPN."""
     pjs = [d.get("pj", 0) for b in (Z or {}).values() for d in b.values()]
@@ -2726,11 +2757,19 @@ def lpf_estado_fecha_texto(Z, liga="arg.1", con_vivo=True):
             jg, pen, _n, err = espn_fixture(liga, dias=3)
             if not err:
                 if jg:
-                    L.append("**Terminados en estos días (según ESPN):** " +
-                             ", ".join(f"{canon_club(a)} {x}-{y} {canon_club(b)}" for a, b, x, y in jg[:12]))
+                    porf = {}
+                    for a, b, x, y in jg:
+                        porf.setdefault(_etiq(a, b) or " _(s/f)_", []).append(f"{canon_club(a)} {x}-{y} {canon_club(b)}")
+                    L.append("**Terminados (según ESPN):**")
+                    for et, lst in sorted(porf.items()):
+                        L.append(f"· **Fecha{et.replace(' _(f','').replace(')_','').replace(' _(s/f)_','?')}**: " + ", ".join(lst))
                 if pen:
-                    L.append("**Por jugarse / en curso (según ESPN):** " +
-                             ", ".join(f"{canon_club(a)} vs {canon_club(b)}" for a, b in pen[:12]))
+                    porf2 = {}
+                    for a, b in pen:
+                        porf2.setdefault(_etiq(a, b) or " _(s/f)_", []).append(f"{canon_club(a)} vs {canon_club(b)}")
+                    L.append("**Por jugarse / en curso (según ESPN):**")
+                    for et, lst in sorted(porf2.items()):
+                        L.append(f"· **Fecha{et.replace(' _(f','').replace(')_','').replace(' _(s/f)_','?')}**: " + ", ".join(lst))
                 L.append("_Esto último sale en vivo de ESPN y es solo informativo: la app calcula con las tablas cargadas, "
                          "no con estos partidos._")
         except Exception:
