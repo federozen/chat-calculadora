@@ -2048,12 +2048,18 @@ def lpf_descenso_texto(Z, rest, apertura=None, prev=None, n_anual=1, n_prom=1, e
         L.append(promedio_que_necesita_texto(equipo, anual, rest, prev or {}, n_prom))
     else:
         df = liga_tabla_df(anual)
-        zona_roja = list(df.tail(n_anual)["Equipo"])
-        L.append(f"**Hoy se irían por la anual:** {', '.join(zona_roja)}.")
         dfp = promedios_df(anual, rest, prev or {})
-        peor = list(dfp.tail(n_prom)["Equipo"])
-        L.append(f"**Hoy se irían por promedio:** {', '.join(peor)}" +
+        # Regla: primero baja el último del PROMEDIO; el segundo descenso sale de la ANUAL
+        # excluyendo al que ya bajó por promedio (si es el mismo, pasa al anteúltimo).
+        por_prom = list(dfp.tail(n_prom)["Equipo"])
+        por_anual = [e for e in list(df["Equipo"]) if e not in por_prom][-n_anual:] if n_anual else []
+        L.append(f"**Baja por promedios:** {', '.join(por_prom)}" +
                  ("" if (prev or {}) else " _(sin temporadas previas cargadas: el promedio sale solo del 2026)_") + ".")
+        L.append(f"**Baja por la Tabla General (anual):** {', '.join(por_anual)}.")
+        ultimo_anual = list(df.tail(1)["Equipo"])[0]
+        if ultimo_anual in por_prom:
+            L.append(f"_{ultimo_anual} es último en **las dos tablas**: desciende por promedios, y el segundo descenso "
+                     f"recae en el siguiente peor de la anual (**{', '.join(por_anual)}**)._")
     L.append("_En posiciones que definen descenso, un empate en puntos NO se define por diferencia de gol: "
              "se juega un partido desempate (art. 26.2 y 111 del Reglamento General de AFA)._")
     return "\n\n".join(L)
@@ -2669,7 +2675,7 @@ def lpf_estado_datos(Z, hoy=None):
         return "No hay zonas cargadas.", False
     cargadas, mx = min(pjs), max(pjs)
     esperadas, total = lpf_fecha_esperada(hoy)
-    detalle = f"fecha **{cargadas}** de {total}" + (f" (algunos van {mx}: hay partidos postergados)" if mx != cargadas else "")
+    detalle = f"fecha **{cargadas}** de {total}" + (f" — {sum(1 for p in pjs if p > cargadas)} equipos ya jugaron {mx}: la fecha está en curso (o hay postergados)" if mx != cargadas else "")
     import datetime as _dt
     hoyd = hoy or _dt.date.today()
     en_juego = None
@@ -2688,6 +2694,39 @@ def lpf_estado_datos(Z, hoy=None):
     return (f"⚠️ **Datos desactualizados**: tenés la {detalle}, pero según el calendario oficial "
             f"ya se jugaron **{esperadas}**. Te faltan **{faltan}** fecha(s) por cargar — los resultados "
             f"que no cargues **no se toman**, y las cuentas de playoffs, descenso y copas van a salir viejas."), False
+
+def lpf_estado_fecha_texto(Z, liga="arg.1", con_vivo=True):
+    """Qué está tomado y qué no: por PJ de cada equipo, más los partidos de hoy según ESPN."""
+    pjs = [d.get("pj", 0) for b in (Z or {}).values() for d in b.values()]
+    if not pjs:
+        return "No hay zonas cargadas."
+    mn, mx = min(pjs), max(pjs)
+    L = [f"**¿Qué tiene cargado la app?** (sale de los partidos jugados de cada equipo)"]
+    if mn == mx:
+        L.append(f"Todos los equipos tienen **{mx} partidos**: la fecha {mx} está completa y tomada. ✅")
+    else:
+        L.append(f"La fecha **{mx}** está a medias: unos equipos van {mx} y otros {mn}.")
+        for lab in sorted(Z):
+            ya = sorted([e for e, d in Z[lab].items() if d.get("pj", 0) >= mx])
+            no = sorted([e for e, d in Z[lab].items() if d.get("pj", 0) < mx])
+            L.append(f"**Zona {lab} — ya jugaron y están tomados ({len(ya)}):** " + (", ".join(ya) or "—"))
+            L.append(f"**Zona {lab} — todavía NO ({len(no)}):** " + (", ".join(no) or "—"))
+        L.append("_Los que todavía no jugaron no suman nada en las cuentas: cuando terminen, recargá las zonas._")
+    if con_vivo:
+        try:
+            jg, pen, _n, err = espn_fixture(liga, dias=3)
+            if not err:
+                if jg:
+                    L.append("**Terminados en estos días (según ESPN):** " +
+                             ", ".join(f"{canon_club(a)} {x}-{y} {canon_club(b)}" for a, b, x, y in jg[:12]))
+                if pen:
+                    L.append("**Por jugarse / en curso (según ESPN):** " +
+                             ", ".join(f"{canon_club(a)} vs {canon_club(b)}" for a, b in pen[:12]))
+                L.append("_Esto último sale en vivo de ESPN y es solo informativo: la app calcula con las tablas cargadas, "
+                         "no con estos partidos._")
+        except Exception:
+            pass
+    return "\n\n".join(L)
 
 def panorama(equipos, jugados, esc, directo=None):
     d = DIRECTO() if directo is None else directo; hay3 = MEJORES_TERCEROS() > 0
@@ -3934,6 +3973,8 @@ def _router_lpf(acc, E):
         out.append(("df", promedios_df(anual, rest, prev), "Promedios (piso = perdiendo todo · techo = ganando todo)"))
         out.append(("df", lpf_anual_df(Z, ap), "Tabla General 2026"))
         return out
+    if intent == "estado_fecha":
+        return [("md", lpf_estado_fecha_texto(Z))]
     if intent == "actualizado":
         t, ok = lpf_estado_datos(Z)
         return [("success" if ok else "warning", t)]
@@ -4030,7 +4071,7 @@ AYUDA_LPF = """**Calculadora LPF 2026 — qué podés preguntar**
 - *Calendario* — qué tan bravo es el fixture que le queda a cada uno
 
 **Control de datos**
-- *¿Está actualizado?* — compara lo cargado con el calendario oficial del torneo
+- *¿Está actualizado?* — compara lo cargado con el calendario oficial del torneo\n- *Estado de la fecha* / *en vivo* — quién ya jugó y está tomado, quién no, y los partidos de hoy según ESPN
 - Después de casi cualquier respuesta: *¿por qué?* — te desarma la cuenta
 
 _Cargá el histórico con el botón del panel para que la anual y los promedios sean los reales.
@@ -4527,6 +4568,9 @@ def _parse_kw(q):
         tcam = detectar_equipo(q, _allt) or ("Argentina" if "Argentina" in _allt else None)
     if has("visual", "grilla", "matriz", "cuadro de escenarios", "mapa de escenarios", "tabla de escenarios", "grafic", "placa"):
         return {"intent": "visual", "equipo": team}
+    if has("estado de la fecha", "como se juega esta fecha", "ultimos resultados", "resultados en vivo",
+           "que esta cargado", "quien ya jugo", "que falta jugar", "partidos de hoy", "en vivo"):
+        return {"intent": "estado_fecha"}
     if has("actualizado", "al dia", "esta al dia", "datos viejos", "que fecha tengo", "que fecha va"):
         return {"intent": "actualizado"}
     if has("playoff", "play off", "play-off", "octavos", "reducido", "entrar a los ocho", "top 8", "clasificar a octavos"):
