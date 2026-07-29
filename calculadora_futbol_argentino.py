@@ -2737,6 +2737,45 @@ def lpf_estado_fecha_texto(Z, liga="arg.1", con_vivo=True):
             pass
     return "\n\n".join(L)
 
+def lpf_relato_zona_texto(Z, lab, rest, hoy_fecha=None):
+    """Narración de una zona, armada con los números del motor (sin LLM: no puede inventar)."""
+    base = (Z or {}).get(lab)
+    if not base:
+        return f"No tengo cargada la Zona {lab}."
+    df = liga_tabla_df(base); orden = list(df["Equipo"])
+    pts = {e: base[e]["pts"] for e in base}
+    n = len(orden); k = 8
+    lider = orden[0]; octavo = orden[k-1] if n >= k else orden[-1]
+    noveno = orden[k] if n > k else None
+    gx = {e: rest.get(e, 0) for e in base}
+    jugadas = max((d.get("pj", 0) for d in base.values()), default=0)
+    P = [f"**Zona {lab} — cómo viene** (fecha {jugadas} de {LPF_FECHAS_TOTAL})"]
+    P.append(f"Manda **{lider}** con {pts[lider]} puntos. La zona de clasificación se corta en el 8º, "
+             f"hoy **{octavo}** con {pts[octavo]}" +
+             (f", y el primero que queda afuera es **{noveno}** con {pts[noveno]}." if noveno else "."))
+    if noveno and pts[octavo] == pts[noveno]:
+        P.append(f"Están igualados en puntos: hoy entra {octavo} por diferencia de gol (art. 16 a).")
+    # ya clasificados / eliminados exactos
+    dentro = [e for e in orden if _liga_in_out(e, base, rest, k) == "in"]
+    fuera = [e for e in orden if _liga_in_out(e, base, rest, k) == "out"]
+    if dentro:
+        P.append(f"**Ya tienen los playoffs asegurados:** {', '.join(dentro)}.")
+    if fuera:
+        P.append(f"**Ya no llegan:** {', '.join(fuera)}.")
+    if not dentro and not fuera:
+        P.append("Con lo que falta, **todos siguen con chances matemáticas** de entrar entre los 8.")
+    # pelea abierta: cuántos están a menos de una victoria del corte
+    if noveno:
+        cerca = [e for e in orden[k:] if pts[octavo] - pts[e] <= 3 and gx.get(e, 0) > 0]
+        if cerca:
+            P.append(f"A una victoria del corte o menos: {', '.join(cerca[:6])}" +
+                     (f" y {len(cerca)-6} más" if len(cerca) > 6 else "") + ".")
+    piso, techo = pts[orden[-1]], pts[lider] + 3 * gx.get(lider, 0)
+    P.append(f"Quedan **{max(gx.values()) if gx else 0} fechas** por delante: el líder puede llegar a {techo} "
+             f"y el último de la zona todavía tiene {pts[orden[-1]] + 3*gx.get(orden[-1],0)} de techo.")
+    P.append("_Escrito con los números de la tabla cargada: no estima ni pronostica._")
+    return "\n\n".join(P)
+
 def panorama(equipos, jugados, esc, directo=None):
     d = DIRECTO() if directo is None else directo; hay3 = MEJORES_TERCEROS() > 0
     filas = []
@@ -4031,7 +4070,12 @@ def _router_lpf(acc, E):
         if la != lb:
             out.append(("info", "Ojo: están en zonas distintas, así que compiten por lugares distintos."))
         return out
-    if intent in ("arbol", "previa", "juega", "bisagra", "visual", "mapa", "barras", "puesto", "simulador", "relato"):
+    if intent == "relato":
+        if equipo:
+            lab = lpf_zona_de_equipo(equipo, Z)
+            return [("md", lpf_relato_zona_texto(Z, lab, rest))] if lab else [("warning", f"No encuentro a {equipo}.")]
+        return [("md", lpf_relato_zona_texto(Z, l, rest)) for l in sorted(Z)]
+    if intent in ("arbol", "previa", "juega", "bisagra", "visual", "mapa", "barras", "puesto", "simulador"):
         return [("info", "Esa vista necesita enumerar todos los marcadores posibles, y con 15 fechas por delante "
                          "son demasiados escenarios. Para el Clausura usá: **chances** (simulación), **proyección**, "
                          "**qué necesita X**, **octavos**, **descenso** o **copas**.")]
@@ -4054,42 +4098,52 @@ def _router_lpf(acc, E):
     return [("md", AYUDA_LPF)]
 
 
-AYUDA_LPF = """**Calculadora LPF 2026 — qué podés preguntar**
+AYUDA_LPF = """### ⚽ Calculadora LPF 2026 — guía de uso
 
-**Playoffs (top 8 de cada zona)**
-- *¿Qué necesita River para los playoffs?* — cuenta exacta, con los cruces mano a mano y el «por qué»
-- *Tabla* — las dos zonas con la línea de clasificación
-- *Octavos* / *cruces* — cómo quedarían los 8 partidos si terminara hoy
-- *Probabilidades* / *chances* — % de entrar a los playoffs por simulación (zona por zona)
-- *Máximos* — a cuánto puede llegar cada uno como techo
-- También entiende: *¿quién clasifica hoy?* · *¿cuántos puntos necesita Boca?* · *¿está eliminado X?* · *¿puede clasificar X?*
+**Cómo cargar los datos**
+1. Panel izquierdo → **«🇦🇷 Cargar Zonas A y B del Clausura 2026»**. Ese botón trae todo junto: las dos zonas, la Tabla Anual y los promedios.
+2. Para actualizar después de cada fecha: **«⚡ Traer de ESPN»** (automático) o pegá las tablas de Promiedos y tocá «✅ Cargar LPF 2026».
+3. La app te avisa sola si tus datos quedaron viejos o si hay una fecha en curso.
 
-**Descenso (anual + promedios)**
-- *Descenso* — quiénes se irían hoy por cada tabla
-- *¿Se salva Tigre?* / *promedio de Tigre* — análisis exacto por promedio y por anual
-- *Promedios* — la tabla con PROMEDIO, piso (perdiendo todo) y techo (ganando todo)
-- También entiende: *¿quién se salva?* · *¿quién está en riesgo?* · *¿quién se va hoy?*
+---
 
-**Copas**
-- *Copas* / *Libertadores* / *Sudamericana* — cómo quedarían las plazas 2027
-- *¿River llega a la Libertadores?* — tu puesto en la tabla **sin campeones**, que es la que vale
-- *Anual* — la Tabla General 2026 (define el Campeón de Liga)
-- También entiende: *¿quién juega la Libertadores?* · *¿quiénes van a la Sudamericana?*
+### 🏆 Playoffs (entran los 8 primeros de cada zona)
+- **¿Qué necesita River para los playoffs?** — la cuenta exacta, con los cruces mano a mano y el «🔍 por qué»
+- **Tabla** — las dos zonas con la línea de clasificación
+- **Octavos** — cómo quedarían los 8 cruces si terminara hoy (1ºA-8ºB, 1ºB-8ºA…)
+- **Relato de la zona** — el panorama escrito, listo para la nota
+- **Probabilidades** — % de entrar a los playoffs por simulación
+- **Proyección** — con cuántos puntos termina cada uno si mantiene el ritmo
+- _También:_ ¿quién clasifica hoy? · ¿cuántos puntos necesita Boca? · ¿está eliminado X? · máximos
 
-**Análisis de cada equipo**
-- *Ficha de River* — puesto, ritmo, DG, rivales que le quedan y dificultad
-- *Comparar River y Boca* — cara a cara (avisa si están en zonas distintas)
-- *Proyección* — con cuántos puntos termina cada uno si mantiene el ritmo
-- *Calendario* — qué tan bravo es el fixture que le queda a cada uno
-- *¿Contra quién juega River?* — los rivales que le quedan
+### 📉 Descenso (bajan 2: uno por promedios y otro por la anual)
+- **Descenso** — quiénes se irían hoy por cada tabla, con la regla si el mismo es último en las dos
+- **¿Se salva Aldosivi?** — análisis exacto por promedio y por anual, con piso y techo
+- **Promedios** — la tabla completa con PROMEDIO, piso y techo
+- _También:_ ¿quién se salva? · ¿quién está en riesgo? · zona de descenso
 
-**Control de datos**
-- *¿Está actualizado?* — compara lo cargado con el calendario oficial del torneo\n- *Estado de la fecha* / *en vivo* — quién ya jugó y está tomado, quién no, y los partidos de hoy según ESPN
-- Después de casi cualquier respuesta: *¿por qué?* — te desarma la cuenta
+### 🌎 Copas 2027
+- **Copas** — cómo quedan las plazas de Libertadores y Sudamericana
+- **¿River llega a la Libertadores?** — tu puesto en la tabla **sin campeones**, que es la que define
+- **Anual** — la Tabla General 2026 (su 1º es el Campeón de Liga)
+- _También:_ ¿quién juega la Libertadores? · ¿quiénes van a la Sudamericana?
 
-_Cargá el histórico con el botón del panel para que la anual y los promedios sean los reales.
-El árbol, la previa de la fecha y las placas del modo grupo no aplican acá: con 15 fechas por
-delante hay demasiados escenarios para enumerar (usá chances y proyección)._"""
+### 🔎 Por equipo
+- **Ficha de River** — puesto, ritmo, DG, rivales que le quedan y dificultad
+- **Comparar River y Boca** — cara a cara (avisa si están en zonas distintas)
+- **Calendario** — qué tan bravo es el fixture de cada uno
+- **¿Contra quién juega River?** — los rivales que le restan
+
+### 🔴 Control de datos
+- **Estado de la fecha** — quién ya jugó y está tomado, quién no, y los partidos de estos días con resultado (en vivo desde ESPN)
+- **¿Está actualizado?** — compara lo cargado con el calendario oficial del torneo
+- Después de casi cualquier respuesta: **¿por qué?** — te desarma la cuenta paso a paso
+
+---
+
+_Todo se calcula en Python con los datos cargados: los veredictos («ya está», «quedó afuera», puntos que faltan) son **exactos**, y lo que es estimación (probabilidades, proyección) va siempre rotulado como tal. Nada lo escribe una IA por su cuenta._
+
+_El árbol de decisión y la previa partido por partido no aplican acá: requieren enumerar todos los marcadores posibles y con tantas fechas por delante son demasiados escenarios._"""
 
 
 def _router_liga_tabla(acc, E):
@@ -4591,6 +4645,8 @@ def _parse_kw(q):
         return {"intent": "playoffs", "equipo": team}
     if has("contra quien juega", "quienes le quedan", "que rivales", "quien le queda"):
         return {"intent": "ficha", "equipo": team}
+    if has("relato", "contame", "como viene la zona", "resumen de la zona", "panorama de la zona", "como esta la pelea"):
+        return {"intent": "relato", "equipo": team}
     if has("estado de la fecha", "como se juega esta fecha", "ultimos resultados", "resultados en vivo",
            "que esta cargado", "quien ya jugo", "que falta jugar", "partidos de hoy", "en vivo"):
         return {"intent": "estado_fecha"}
