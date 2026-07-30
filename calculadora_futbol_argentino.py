@@ -568,7 +568,12 @@ def liga_que_necesita_texto(equipo, base, rest, zonas, texto, pend=None):
     elif inalc >= k:
         L.append(f"❌ Ya no puede entrar a **{nombre}** (matemáticamente quedó afuera).")
     else:
-        necesita = max(0, (otros[k-1] + 1) - pts[equipo]) if len(otros) >= k else 0
+        # Piso AJUSTADO por los mano a mano si tenemos el fixture; si no, piso "todos ganan todo".
+        if pend:
+            linea = _linea_garantia(base, rest, pend, equipo, k)
+            necesita = max(0, (linea + 1) - pts[equipo]) if linea >= 0 else 0
+        else:
+            necesita = max(0, (otros[k-1] + 1) - pts[equipo]) if len(otros) >= k else 0
         if necesita == 0:
             L.append(f"✅ Ya está asegurado en **{nombre}**.")
         elif necesita <= 3 * gx:
@@ -586,17 +591,17 @@ def liga_que_necesita_texto(equipo, base, rest, zonas, texto, pend=None):
             if directos:
                 L.append(f"⚔️ **Mano a mano:** se cruza con {', '.join(directos)}, rival(es) directo(s) por {nombre} — "
                          f"ganarles vale doble (suma y los deja sin sumar).")
-    pq = _porque_liga(equipo, base, rest, zonas, texto)
+    pq = _porque_liga(equipo, base, rest, zonas, texto, pend)
     if pq:
         L.append("🔍 **Por qué:** " + pq)
     if pend:
-        L.append("_El «ya está / quedó afuera» es exacto. Los puntos a sumar son un piso seguro (asume que el resto gana todo lo suyo); "
-                 "los cruces directos de arriba ajustan eso a favor._")
+        L.append("_El «ya está / quedó afuera» es exacto. Los puntos a sumar son un **piso ajustado**: es una cota segura "
+                 "(si la alcanzás, entrás fijo) que ya descuenta los mano a mano entre rivales, así no pide imposibles._")
     else:
         L.append("_Cuenta por puntos asumiendo que los rivales ganan todo lo suyo (piso seguro). Pegá el **fixture** para ver tus cruces directos._")
     return "\n\n".join(L)
 
-def _porque_liga(equipo, base, rest, zonas, texto):
+def _porque_liga(equipo, base, rest, zonas, texto, pend=None):
     tgt = zona_target(zonas, texto)
     if not tgt or equipo not in base:
         return None
@@ -614,9 +619,25 @@ def _porque_liga(equipo, base, rest, zonas, texto):
         muestra = ", ".join(arr[:4]) + (f" y {len(arr)-4} más" if len(arr) > 4 else "")
         return (f"su techo es {pmax[equipo]} pts (ganando sus {g}), y ya hay {inalc} por encima de ese techo "
                 f"({muestra}): no los puede pasar.")
+    mx = pmax[equipo]
+    if pend:
+        # Explicación coherente con el PISO AJUSTADO por los mano a mano.
+        linea = _linea_garantia(base, rest, pend, equipo, k)
+        falta = max(0, (linea + 1) - pts[equipo])
+        edges = [(a, b) for (a, b) in pend if a in base and b in base and equipo not in (a, b)]
+        otros = sorted(((x, pmax[x]) for x in base if x != equipo), key=lambda kv: -kv[1])
+        rt, rm = otros[k-1]
+        txt = (f"si {', '.join(x for x, _ in otros[:k])} ganaran TODO, el {k}º llegaría a {rm}; pero se cruzan "
+               f"{len(edges)} veces entre ellos y en cada cruce alguien pierde puntos, así que en el mejor caso "
+               f"realizable el {k}º no pasa de {linea}. Para asegurarte tenés que superarlo ({linea+1}) y hoy "
+               f"tenés {pts[equipo]} → te faltan {falta}.")
+        if mx <= linea:
+            txt += (f" Y aun ganando todo lo tuyo llegás a {mx}, que no supera esa línea: por eso no te alcanza "
+                    f"solo, necesitás que los de arriba también pinchen.")
+        return txt
     otros = sorted(((x, pmax[x]) for x in base if x != equipo), key=lambda kv: -kv[1])
     rt, rm = otros[k-1]
-    falta = max(0, rm + 1 - pts[equipo]); mx = pmax[equipo]
+    falta = max(0, rm + 1 - pts[equipo])
     txt = (f"el {k}º que más puede sumar es {rt} (termina como mucho en {rm}); para asegurarte tenés que "
            f"superarlo ({rm+1}) y hoy tenés {pts[equipo]} → te faltan {falta}.")
     if mx <= rm:
@@ -2038,7 +2059,7 @@ def lpf_anual_base(Z, apertura=None):
 def lpf_anual_df(Z, apertura=None):
     return liga_tabla_df(lpf_anual_base(Z, apertura))
 
-def lpf_descenso_texto(Z, rest, apertura=None, prev=None, n_anual=1, n_prom=1, equipo=None):
+def lpf_descenso_texto(Z, rest, apertura=None, prev=None, n_anual=1, n_prom=1, equipo=None, pend=None):
     anual = lpf_anual_base(Z, apertura)
     n = len(anual)
     if n < 4:
@@ -2050,7 +2071,7 @@ def lpf_descenso_texto(Z, rest, apertura=None, prev=None, n_anual=1, n_prom=1, e
         if equipo not in anual:
             return f"No encuentro a **{equipo}** en las zonas cargadas."
         L.append("### Por la Tabla General (anual)")
-        L.append(liga_que_necesita_texto(equipo, anual, rest, zonas_anual, "no descender"))
+        L.append(liga_que_necesita_texto(equipo, anual, rest, zonas_anual, "no descender", pend))
         L.append("### Por promedios")
         L.append(promedio_que_necesita_texto(equipo, anual, rest, prev or {}, n_prom))
     else:
@@ -2152,7 +2173,7 @@ def lpf_copas_texto(Z, apertura=None, camp_apertura="", camp_clausura="", camp_c
              "es del ascenso o desciende, su plaza va al mejor equipo de Primera de esa Copa (art. 28.2.2)._")
     return "\n\n".join(L)
 
-def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""), extras=("", "")):
+def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""), extras=("", ""), pend=None):
     """Qué necesita un equipo para entrar a las copas POR LA ANUAL, ya descontados los campeones."""
     if len((Z or {})) < 2:
         return "Cargá las dos zonas."
@@ -2171,11 +2192,15 @@ def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""),
          f"En la anual está {P['orden'].index(equipo)+1}º, pero para las copas lo que vale es la **tabla sin los campeones**: "
          f"ahí está **{pos_red}º**, y por esta vía entran **{n_t} a Libertadores** y los **6 siguientes a Sudamericana**."]
     _nag = "_Cuenta por puntos asumiendo que los rivales ganan todo lo suyo (piso seguro). Pegá el **fixture** para ver tus cruces directos._"
-    _nota_copas = ("_Piso seguro: asume que cada rival gana todo lo que le queda. En la anual competís contra los 30, "
+    _nh2h = ("_El «ya está / quedó afuera» es exacto. Los puntos a sumar son un **piso ajustado**: es una cota segura "
+             "(si la alcanzás, entrás fijo) que ya descuenta los mano a mano entre rivales, así no pide imposibles._")
+    _nota_copas = ("_Piso ajustado por los mano a mano de la anual (cota segura). Ojo: en la anual competís contra los 30, "
+                   "pero solo enfrentás a 16, así que el número real suele ser todavía menor._" if pend else
+                   "_Piso seguro: asume que cada rival gana todo lo que le queda. En la anual competís contra los 30, "
                    "pero solo enfrentás a 16, así que en la práctica el número real suele ser menor._")
     for _obj in ("libertadores", "sudamericana"):
-        _t = liga_que_necesita_texto(equipo, base_red, rest, zonas, _obj)
-        L.append(_t.replace(_nag, _nota_copas))
+        _t = liga_que_necesita_texto(equipo, base_red, rest, zonas, _obj, pend)
+        L.append(_t.replace(_nag, _nota_copas).replace(_nh2h, _nota_copas))
     if P["avisos"]:
         L.append("_Ojo: " + " ".join(P["avisos"]) + "_")
     return "\n\n".join(L)
@@ -2266,6 +2291,421 @@ def canon_club(nombre):
 
 def canon_base(base):
     return {canon_club(e): d for e, d in (base or {}).items()}
+
+# ═══ FIXTURE Clausura 2026 (Tarea 2) — texto crudo + parser + pendientes ═══
+LPF_FIXTURE_2026 = """
+Fecha 1
+Interzonal: Defensa y Justicia – Aldosivi
+Zona A
+Deportivo Riestra – Boca
+Estudiantes – Independiente
+Newell's – Talleres
+Vélez – Instituto
+Platense – Unión
+Lanús – San Lorenzo
+Gimnasia (Mza.) – Central Córdoba
+Zona B
+River – Barracas Central
+Racing – Gimnasia
+Belgrano – Rosario Central
+Estudiantes (Río Cuarto) – Tigre
+Sarmiento – Argentinos
+Huracán – Banfield
+Atlético Tucumán – Independiente Rivadavia Mza.
+
+Fecha 2
+Interzonal: Central Córdoba – Atlético Tucumán
+Zona A
+San Lorenzo – Gimnasia (Mza.)
+Unión – Lanús
+Instituto – Platense
+Talleres – Vélez
+Independiente – Newell's
+Boca – Estudiantes
+Defensa y Justicia – Deportivo Riestra
+Zona B
+Independiente Rivadavia Mza. – Huracán
+Banfield – Sarmiento
+Argentinos – Estudiantes (Río Cuarto)
+Tigre – Belgrano
+Rosario Central – Racing
+Gimnasia – River
+Barracas Central – Aldosivi
+
+Fecha 3
+Interzonal: Deportivo Riestra – Barracas Central
+Zona A
+Estudiantes – Defensa y Justicia
+Newell's – Boca
+Vélez – Independiente
+Platense – Talleres
+Lanús – Instituto
+Gimnasia (Mza.) – Unión
+Central Córdoba – San Lorenzo
+Zona B
+Aldosivi – Gimnasia
+River – Rosario Central
+Racing – Tigre
+Belgrano – Argentinos
+Estudiantes (Río Cuarto) – Banfield
+Sarmiento – Independiente Rivadavia Mza.
+Huracán – Atlético Tucumán
+
+Fecha 4
+Interzonal: San Lorenzo – Huracán
+Zona A
+Unión – Central Córdoba
+Instituto – Gimnasia (Mza.)
+Talleres – Lanús
+Independiente – Platense
+Boca – Vélez
+Defensa y Justicia – Newell's
+Deportivo Riestra – Estudiantes
+Zona B
+Atlético Tucumán – Sarmiento
+Independiente Rivadavia (Mza.) – Estudiantes (Río Cuarto)
+Banfield – Belgrano
+Argentinos – Racing
+Tigre – River
+Rosario Central – Aldosivi
+Gimnasia – Barracas Central
+
+Fecha 5
+Interzonal: Estudiantes – Gimnasia
+Zona A
+Newell's – Deportivo Riestra
+Vélez – Defensa y Justicia
+Platense – Boca
+Lanús – Independiente
+Gimnasia (Mza.) – Talleres
+Central Córdoba – Instituto
+San Lorenzo – Unión
+Zona B
+Barracas Central – Rosario Central
+Aldosivi – Tigre
+River – Argentinos
+Racing – Banfield
+Belgrano – Independiente Rivadavia Mza.
+Estudiantes (Río Cuarto) – Atlético Tucumán
+Sarmiento – Huracán
+
+Fecha 6 (fecha interzonal completa)
+River – Vélez
+Barracas Central – Platense
+Talleres – Rosario Central
+Sarmiento – Estudiantes
+Belgrano – Defensa y Justicia
+Lanús – Argentinos
+Racing – Boca
+Independiente – Independiente Rivadavia Mza.
+Aldosivi – Unión
+Atlético Tucumán – Instituto
+Estudiantes (Río Cuarto) – San Lorenzo
+Gimnasia – Gimnasia (Mza.)
+Tigre – Central Córdoba
+Huracán – Deportivo Riestra
+Newell's – Banfield
+
+Fecha 7
+Interzonal: Unión – Sarmiento
+Zona A
+Instituto – San Lorenzo
+Talleres – Central Córdoba
+Independiente – Gimnasia (Mza.)
+Boca – Lanús
+Defensa y Justicia – Platense
+Deportivo Riestra – Vélez
+Estudiantes – Newell's
+Zona B
+Huracán – Estudiantes (Río Cuarto)
+Atlético Tucumán – Belgrano
+Independiente Rivadavia Mza. – Racing
+Banfield – River
+Argentinos – Aldosivi
+Tigre – Barracas Central
+Rosario Central – Gimnasia
+
+Fecha 8
+Interzonal: Rosario Central – Newell's
+Zona A
+Vélez – Estudiantes
+Platense – Deportivo Riestra
+Lanús – Defensa y Justicia
+Gimnasia (Mza.) – Boca
+Central Córdoba – Independiente
+San Lorenzo – Talleres
+Unión – Instituto
+Zona B
+Gimnasia – Tigre
+Barracas Central – Argentinos
+Aldosivi – Banfield
+River – Independiente Rivadavia Mza.
+Racing – Atlético Tucumán
+Belgrano – Huracán
+Estudiantes (Río Cuarto) – Sarmiento
+
+Fecha 9
+Interzonal: Instituto – Estudiantes (Río Cuarto)
+Zona A
+Talleres – Unión
+Independiente – San Lorenzo
+Boca – Central Córdoba
+Defensa y Justicia – Gimnasia (Mza.)
+Deportivo Riestra – Lanús
+Estudiantes – Platense
+Newell's – Vélez
+Zona B
+Sarmiento – Belgrano
+Huracán – Racing
+Atlético Tucumán – River
+Independiente Rivadavia Mza. – Aldosivi
+Banfield – Barracas Central
+Argentinos – Gimnasia
+Tigre – Rosario Central
+
+Fecha 10
+Interzonal: Vélez – Tigre
+Zona A
+Platense – Newell's
+Lanús – Estudiantes
+Gimnasia (Mza.) – Deportivo Riestra
+Central Córdoba – Defensa y Justicia
+San Lorenzo – Boca
+Unión – Independiente
+Instituto – Talleres
+Zona B
+Rosario Central – Argentinos
+Gimnasia – Banfield
+Barracas Central – Independiente Rivadavia Mza.
+Aldosivi – Atlético Tucumán
+River – Huracán
+Racing – Sarmiento
+Belgrano – Estudiantes (Río Cuarto)
+
+Fecha 11
+Interzonal: Talleres – Belgrano
+Zona A
+Independiente – Instituto
+Boca – Unión
+Defensa y Justicia – San Lorenzo
+Deportivo Riestra – Central Córdoba
+Estudiantes – Gimnasia (Mza.)
+Newell's – Lanús
+Vélez – Platense
+Zona B
+Estudiantes (Río Cuarto) – Racing
+Sarmiento – River
+Huracán – Aldosivi
+Atlético Tucumán – Barracas Central
+Independiente Rivadavia Mza. – Gimnasia
+Banfield – Rosario Central
+Argentinos – Tigre
+
+Fecha 12
+Interzonal: Platense – Argentinos
+Zona A
+Lanús – Vélez
+Gimnasia (Mza.) – Newell's
+Central Córdoba – Estudiantes
+San Lorenzo – Deportivo Riestra
+Unión – Defensa y Justicia
+Instituto – Boca
+Talleres – Independiente
+Zona B
+Tigre – Banfield
+Rosario Central – Independiente Rivadavia Mza.
+Gimnasia – Atlético Tucumán
+Barracas Central – Huracán
+Aldosivi – Sarmiento
+River – Estudiantes (Río Cuarto)
+Racing – Belgrano
+
+Fecha 13
+Interzonal: Racing – Independiente
+Zona A
+Boca – Talleres
+Defensa y Justicia – Instituto
+Deportivo Riestra – Unión
+Estudiantes – San Lorenzo
+Newell's – Central Córdoba
+Vélez – Gimnasia (Mza.)
+Platense – Lanús
+Zona B
+Belgrano – River
+Estudiantes (Río Cuarto) – Aldosivi
+Sarmiento – Barracas Central
+Huracán – Gimnasia
+Atlético Tucumán – Rosario Central
+Independiente Rivadavia Mza. – Tigre
+Banfield – Argentinos
+
+Fecha 14
+Interzonal: Banfield – Lanús
+Zona A
+Gimnasia (Mza.) – Platense
+Central Córdoba – Vélez
+San Lorenzo – Newell's
+Unión – Estudiantes
+Instituto – Deportivo Riestra
+Talleres – Defensa y Justicia
+Independiente – Boca
+Zona B
+Argentinos – Independiente Rivadavia Mza.
+Tigre – Atlético Tucumán
+Rosario Central – Huracán
+Gimnasia – Sarmiento
+Barracas Central – Estudiantes (Río Cuarto)
+Aldosivi – Belgrano
+River – Racing
+
+Fecha 15
+Interzonal: Boca – River
+Zona A
+Defensa y Justicia – Independiente
+Deportivo Riestra – Talleres
+Estudiantes – Instituto
+Newell's – Unión
+Vélez – San Lorenzo
+Platense – Central Córdoba
+Lanús – Gimnasia (Mza.)
+Zona B
+Racing – Aldosivi
+Belgrano – Barracas Central
+Estudiantes de Río Cuarto – Gimnasia
+Sarmiento – Rosario Central
+Huracán – Tigre
+Atlético Tucumán – Argentinos Juniors
+Independiente Rivadavia Mza. – Banfield
+
+Fecha 16
+Interzonal: Gimnasia (Mza.) – Independiente Rivadavia Mza.
+Zona A
+Central Córdoba – Lanús
+San Lorenzo – Platense
+Unión – Vélez
+Instituto – Newell's
+Talleres – Estudiantes
+Independiente – Deportivo Riestra
+Boca – Defensa y Justicia
+Zona B
+Banfield – Atlético Tucumán
+Argentinos – Huracán
+Tigre – Sarmiento
+Rosario Central – Estudiantes (Río Cuarto)
+Gimnasia – Belgrano
+Barracas Central – Racing
+Aldosivi – River
+"""
+
+_SEP = __import__("re").compile(r"\s+[–—-]\s+")
+
+def parse_fixture_lpf(text=None, canon=None):
+    if text is None: text = LPF_FIXTURE_2026
+    if canon is None: canon = canon_club
+    """Devuelve lista de dicts: {'f':fecha, 'tipo':'zona'|'inter', 'zona':'A'/'B'/None, 'l':local, 'v':visita}.
+    Canoniza ambos nombres con canon_club para que peguen con las zonas cargadas."""
+    import re
+    juegos, f, tipo, zona = [], 0, None, None
+    for raw in str(text).splitlines():
+        ln = raw.strip()
+        if not ln:
+            continue
+        mf = re.match(r"(?i)^fecha\s+(\d+)", ln)
+        if mf:
+            f = int(mf.group(1)); zona = None
+            tipo = "inter" if "interzonal" in ln.lower() else None
+            continue
+        low = ln.lower()
+        if low.startswith("zona a"):
+            zona, tipo = "A", "zona"; continue
+        if low.startswith("zona b"):
+            zona, tipo = "B", "zona"; continue
+        if low.startswith("interzonal"):
+            resto = ln.split(":", 1)[1] if ":" in ln else ""
+            partes = _SEP.split(resto.strip())
+            if len(partes) == 2:
+                juegos.append({"f": f, "tipo": "inter", "zona": None,
+                               "l": canon(partes[0]), "v": canon(partes[1])})
+            continue
+        partes = _SEP.split(ln)
+        if len(partes) == 2:
+            juegos.append({"f": f, "tipo": tipo or "inter", "zona": zona,
+                           "l": canon(partes[0]), "v": canon(partes[1])})
+    return juegos
+
+def lpf_pendientes(Z, games=None, canon=None):
+    """Pendientes reales desde el fixture, coherentes con el PJ de las zonas cargadas.
+    Un partido está jugado si AMBOS equipos ya llegaron a esa altura de su calendario (por PJ).
+    Devuelve lista de pares (local, visita) canónicos de los partidos por jugar."""
+    if games is None:
+        games = LPF_FIXTURE
+    pj = {}
+    for b in (Z or {}).values():
+        for e, d in b.items():
+            pj[e] = d.get("pj", 0)
+    # índice de cada partido en el calendario de cada equipo (por fecha)
+    orden = {}
+    for g in sorted(games, key=lambda x: x["f"]):
+        for e in (g["l"], g["v"]):
+            orden.setdefault(e, []).append(g)
+    idx = {}
+    for e, gs in orden.items():
+        for i, g in enumerate(gs, 1):
+            idx[(e, id(g))] = i
+    pend = []
+    for g in games:
+        il = idx[(g["l"], id(g))]; iv = idx[(g["v"], id(g))]
+        jugado = (il <= pj.get(g["l"], 0)) and (iv <= pj.get(g["v"], 0))
+        if not jugado and g["l"] in pj and g["v"] in pj:
+            pend.append((g["l"], g["v"]))
+    return pend
+
+
+def _linea_garantia(base, rest, pend, equipo, k):
+    """Máximo puntaje que puede alcanzar el k-ésimo rival, DESCONTANDO los puntos que se
+    pierden sí o sí en los mano a mano entre rivales (cada partido entre dos del grupo
+    reparte 3, no 6). El equipo necesita superar esta línea (+1) para asegurarse.
+    Es una cota SEGURA: si la alcanzás, entrás fijo; pero ya no cuenta imposibles."""
+    rivales = [x for x in base if x != equipo]
+    if len(rivales) < k:
+        return -1  # nunca puede haber k rivales por encima → ya está adentro
+    pts = {x: base[x]["pts"] for x in base}
+    g = {x: rest.get(x, 0) for x in base}
+    pmax = {x: pts[x] + 3 * g[x] for x in rivales}
+    edges = [(a, b) for (a, b) in (pend or [])
+             if a in base and b in base and equipo not in (a, b)]
+
+    def factible(P):
+        C = [x for x in rivales if pmax[x] >= P]
+        if len(C) < k:
+            return False
+        C.sort(key=lambda x: -pmax[x])
+        S = C[:k]; Sset = set(S)
+        need = {x: max(0, -(-(P - pts[x]) // 3)) for x in S}  # ceil de déficit/3
+        if any(need[x] > g[x] for x in S):
+            return False
+        intra = sum(1 for (a, b) in edges if a in Sset and b in Sset)
+        avail = sum(g[x] for x in S) - intra
+        return sum(need.values()) <= avail
+
+    lo, hi = 0, max((pmax[x] for x in rivales), default=0)
+    ans = 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if factible(mid):
+            ans = mid; lo = mid + 1
+        else:
+            hi = mid - 1
+    return ans
+
+
+# fixture parseado una sola vez (nombres canónicos), para pendientes/rest
+LPF_FIXTURE = parse_fixture_lpf()
+
+def lpf_rest_desde_fixture(Z):
+    """rest por equipo = 16 - PJ (coherente con las tablas cargadas)."""
+    return {e: max(0, LPF_FECHAS_TOTAL - d.get('pj', 0)) for b in (Z or {}).values() for e, d in b.items()}
+
 
 def parse_promedios_tabla(texto, pj_actual=None):
     """Lee la tabla de promedios pegada (formato Promiedos: puesto / nombre / nombre /
@@ -3432,6 +3872,32 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+def cargar_lpf_todo():
+    """Carga offline completa desde las constantes internas: Tabla Anual + Promedios
+    + Zonas A y B + fixture de las 16 fechas. Devuelve (nA, nB, nAnual, nPend)."""
+    if not st.session_state.get("LPF_ANUAL"):
+        st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
+        _pv0 = parse_promedios_tabla(PROMEDIOS_LPF_2026)[0]
+        st.session_state.PROM_TXT = promedios_previas_texto(_pv0)
+        st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
+        st.session_state.LPF_HIST_OK = f"{len(st.session_state.LPF_ANUAL)} equipos en la anual \u00b7 {len(_pv0)} en promedios"
+    _bA = parse_tabla_anual(ZONA_A_LPF_2026)[0]
+    _bB = parse_tabla_anual(ZONA_B_LPF_2026)[0]
+    _Zc = {"A": canon_base(_bA), "B": canon_base(_bB)}
+    _eqc = [e for b in _Zc.values() for e in b]
+    _restc = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0)) for b in _Zc.values() for e, d in b.items()}
+    _pend = lpf_pendientes(_Zc)
+    st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqc, zonas_lpf=_Zc,
+                                   anual_directo=st.session_state.get("LPF_ANUAL") or {},
+                                   pendientes=_pend, rest=_restc, apertura={},
+                                   camps=(st.session_state.get("lpf_c1", "Belgrano"),
+                                          st.session_state.get("lpf_c2", ""),
+                                          st.session_state.get("lpf_c3", "")),
+                                   intl=("", ""), n_anual=1, n_prom=1,
+                                   base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
+    return len(_Zc["A"]), len(_Zc["B"]), len(st.session_state.get("LPF_ANUAL") or {}), len(_pend)
+
+
 # ─── SIDEBAR ─────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("🔧 Configuración")
@@ -3505,320 +3971,328 @@ with st.sidebar:
 
     # Cargar datos
     st.subheader("📥 Cargar datos")
-    modo_carga = st.radio("Fuente", ["🇦🇷 LPF 2026 (Clausura: zonas A y B)", "Otra liga / copa (avanzado)"], label_visibility="collapsed")
+    st.caption("Un solo bot\u00f3n carga todo. El resto es para editar a mano o traer de otra fuente.")
+    if st.button("\U0001F4E5 Cargar TODO (Clausura + Anual + Promedios)", use_container_width=True, type="primary", key="btn_cargar_todo_side"):
+        _a, _b, _an, _pn = cargar_lpf_todo()
+        st.success(f"Listo \u2713 Zona A ({_a}) \u00b7 Zona B ({_b}) \u00b7 Anual ({_an}) \u00b7 {_pn} partidos pendientes")
+        st.rerun()
+    st.caption("Incluye Zonas A y B, Tabla Anual y Promedios (datos internos, **previo a la fecha 2 del Clausura 2026**) "
+               "y el **fixture completo de las 16 fechas** para los cruces mano a mano.")
+    with st.expander("\U0001F6E0\ufe0f Otras formas de cargar o editar a mano (avanzado)", expanded=False):
+        modo_carga = st.radio("Fuente", ["🇦🇷 LPF 2026 (Clausura: zonas A y B)", "Otra liga / copa (avanzado)"], label_visibility="collapsed")
 
-    if modo_carga == "🇦🇷 LPF 2026 (Clausura: zonas A y B)":
-        st.caption("Reglamento LPF 2026: dos zonas de 15, una rueda, 16 fechas. Clasifican los **8 primeros de cada zona** "
-                   "a Octavos. La **Tabla General** (para copas y descenso) suma Apertura + Clausura.")
-        if st.button("⚡ Traer el Clausura de ESPN (automático)", use_container_width=True):
-            with st.spinner("Consultando ESPN…"):
-                _Zx, _errx = espn_lpf_zonas("arg.1")
-            if _errx:
-                st.warning(_errx)
-            else:
-                _jx, _px, _nx, _efx = espn_fixture("arg.1", 120)
-                _eqx = [e for b in _Zx.values() for e in b]
-                _parx, _ = mapear_fixture(_px or [], _eqx)
-                _rx = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0))
-                       for _bz in _Zx.values() for e, d in _bz.items()}
+        if modo_carga == "🇦🇷 LPF 2026 (Clausura: zonas A y B)":
+            st.caption("Reglamento LPF 2026: dos zonas de 15, una rueda, 16 fechas. Clasifican los **8 primeros de cada zona** "
+                       "a Octavos. La **Tabla General** (para copas y descenso) suma Apertura + Clausura.")
+            if st.button("⚡ Traer el Clausura de ESPN (automático)", use_container_width=True):
+                with st.spinner("Consultando ESPN…"):
+                    _Zx, _errx = espn_lpf_zonas("arg.1")
+                if _errx:
+                    st.warning(_errx)
+                else:
+                    _jx, _px, _nx, _efx = espn_fixture("arg.1", 120)
+                    _eqx = [e for b in _Zx.values() for e in b]
+                    _parx, _ = mapear_fixture(_px or [], _eqx)
+                    _rx = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0))
+                           for _bz in _Zx.values() for e, d in _bz.items()}
+                    if not st.session_state.get("LPF_ANUAL"):
+                        st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
+                        _pv0 = parse_promedios_tabla(PROMEDIOS_LPF_2026)[0]
+                        st.session_state.PROM_TXT = promedios_previas_texto(_pv0)
+                        st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
+                        st.session_state.LPF_HIST_OK = f"{len(st.session_state.LPF_ANUAL)} equipos en la anual"
+                    st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqx, zonas_lpf=_Zx,
+                                                   anual_directo=st.session_state.get("LPF_ANUAL") or {},
+                                                   pendientes=lpf_pendientes(_Zx), rest=_rx, apertura={},
+                                                   camps=(st.session_state.get("lpf_c1", "Belgrano"), "", ""), intl=("", ""), n_anual=1, n_prom=1,
+                                                   base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
+                    st.success(f"Cargado de ESPN: Zona A ({len(_Zx.get('A',{}))}) y Zona B ({len(_Zx.get('B',{}))}) ✓")
+                    st.rerun()
+            _za = st.text_area("Tabla Zona A", height=130, key="lpf_a",
+                               placeholder="River Plate, 28, 12, +11\nBoca Juniors, 25, 12, +7\n…")
+            _zb = st.text_area("Tabla Zona B", height=130, key="lpf_b",
+                               placeholder="Racing, 27, 12, +9\nIndependiente, 22, 12, +3\n…")
+            _fx = st.text_area("Fixture que falta (opcional)", height=70, key="lpf_fx",
+                               placeholder="faltan 4 fechas\n— o los partidos: River Plate vs Boca Juniors …")
+            st.markdown("**Paso 1 — histórico (una sola vez)**")
+            if st.button("📦 Cargar Tabla Anual + Promedios LPF 2026", use_container_width=True, type="secondary"):
+                _anual_b, _av1 = parse_tabla_anual(TABLA_ANUAL_LPF_2026)
+                _prev_b, _pja_b, _av2 = parse_promedios_tabla(PROMEDIOS_LPF_2026)
+                st.session_state.LPF_ANUAL = _anual_b
+                st.session_state.PROM_TXT = promedios_previas_texto(_prev_b)
+                st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
+                st.session_state.LPF_HIST_OK = f"{len(_anual_b)} equipos en la anual · {len(_prev_b)} en promedios"
+                st.rerun()
+            if st.session_state.get("LPF_HIST_OK"):
+                st.success("Histórico cargado: " + st.session_state.LPF_HIST_OK + " ✓")
+            st.markdown("**Paso 2 — el Clausura de esta fecha**")
+            if st.button("🇦🇷 Cargar Zonas A y B del Clausura 2026", use_container_width=True, type="primary"):
                 if not st.session_state.get("LPF_ANUAL"):
                     st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
                     _pv0 = parse_promedios_tabla(PROMEDIOS_LPF_2026)[0]
                     st.session_state.PROM_TXT = promedios_previas_texto(_pv0)
                     st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
-                    st.session_state.LPF_HIST_OK = f"{len(st.session_state.LPF_ANUAL)} equipos en la anual"
-                st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqx, zonas_lpf=_Zx,
+                    st.session_state.LPF_HIST_OK = f"{len(st.session_state.LPF_ANUAL)} equipos en la anual · {len(_pv0)} en promedios"
+                _bA, _avA = parse_tabla_anual(ZONA_A_LPF_2026)
+                _bB, _avB = parse_tabla_anual(ZONA_B_LPF_2026)
+                _Zc = {"A": canon_base(_bA), "B": canon_base(_bB)}
+                _eqc = [e for b in _Zc.values() for e in b]
+                _restc = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0)) for b in _Zc.values() for e, d in b.items()}
+                st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqc, zonas_lpf=_Zc,
                                                anual_directo=st.session_state.get("LPF_ANUAL") or {},
-                                               pendientes=_parx, rest=_rx, apertura={},
-                                               camps=(st.session_state.get("lpf_c1", "Belgrano"), "", ""), intl=("", ""), n_anual=1, n_prom=1,
+                                               pendientes=lpf_pendientes(_Zc), rest=_restc, apertura={},
+                                               camps=(st.session_state.get("lpf_c1", "Belgrano"), st.session_state.get("lpf_c2", ""),
+                                                      st.session_state.get("lpf_c3", "")),
+                                               intl=("", ""), n_anual=1, n_prom=1,
                                                base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
-                st.success(f"Cargado de ESPN: Zona A ({len(_Zx.get('A',{}))}) y Zona B ({len(_Zx.get('B',{}))}) ✓")
+                st.success(f"Zonas cargadas: A ({len(_Zc['A'])}) y B ({len(_Zc['B'])}) ✓")
                 st.rerun()
-        _za = st.text_area("Tabla Zona A", height=130, key="lpf_a",
-                           placeholder="River Plate, 28, 12, +11\nBoca Juniors, 25, 12, +7\n…")
-        _zb = st.text_area("Tabla Zona B", height=130, key="lpf_b",
-                           placeholder="Racing, 27, 12, +9\nIndependiente, 22, 12, +3\n…")
-        _fx = st.text_area("Fixture que falta (opcional)", height=70, key="lpf_fx",
-                           placeholder="faltan 4 fechas\n— o los partidos: River Plate vs Boca Juniors …")
-        st.markdown("**Paso 1 — histórico (una sola vez)**")
-        if st.button("📦 Cargar Tabla Anual + Promedios LPF 2026", use_container_width=True, type="secondary"):
-            _anual_b, _av1 = parse_tabla_anual(TABLA_ANUAL_LPF_2026)
-            _prev_b, _pja_b, _av2 = parse_promedios_tabla(PROMEDIOS_LPF_2026)
-            st.session_state.LPF_ANUAL = _anual_b
-            st.session_state.PROM_TXT = promedios_previas_texto(_prev_b)
-            st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
-            st.session_state.LPF_HIST_OK = f"{len(_anual_b)} equipos en la anual · {len(_prev_b)} en promedios"
-            st.rerun()
-        if st.session_state.get("LPF_HIST_OK"):
-            st.success("Histórico cargado: " + st.session_state.LPF_HIST_OK + " ✓")
-        st.markdown("**Paso 2 — el Clausura de esta fecha**")
-        if st.button("🇦🇷 Cargar Zonas A y B del Clausura 2026", use_container_width=True, type="primary"):
-            if not st.session_state.get("LPF_ANUAL"):
-                st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
-                _pv0 = parse_promedios_tabla(PROMEDIOS_LPF_2026)[0]
-                st.session_state.PROM_TXT = promedios_previas_texto(_pv0)
-                st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
-                st.session_state.LPF_HIST_OK = f"{len(st.session_state.LPF_ANUAL)} equipos en la anual · {len(_pv0)} en promedios"
-            _bA, _avA = parse_tabla_anual(ZONA_A_LPF_2026)
-            _bB, _avB = parse_tabla_anual(ZONA_B_LPF_2026)
-            _Zc = {"A": canon_base(_bA), "B": canon_base(_bB)}
-            _eqc = [e for b in _Zc.values() for e in b]
-            _restc = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0)) for b in _Zc.values() for e, d in b.items()}
-            st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqc, zonas_lpf=_Zc,
-                                           anual_directo=st.session_state.get("LPF_ANUAL") or {},
-                                           pendientes=[], rest=_restc, apertura={},
-                                           camps=(st.session_state.get("lpf_c1", "Belgrano"), st.session_state.get("lpf_c2", ""),
-                                                  st.session_state.get("lpf_c3", "")),
-                                           intl=("", ""), n_anual=1, n_prom=1,
-                                           base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
-            st.success(f"Zonas cargadas: A ({len(_Zc['A'])}) y B ({len(_Zc['B'])}) ✓")
-            st.rerun()
-        with st.expander("📊 Actualizar histórico a mano (opcional)"):
-            if "lpf_anual_fetch" in st.session_state:
-                st.session_state["lpf_anual"] = st.session_state.pop("lpf_anual_fetch")
-            if st.button("🇦🇷 Cargar Tabla Anual LPF 2026 (previa a la fecha 2)", use_container_width=True):
-                st.session_state["lpf_anual_fetch"] = TABLA_ANUAL_LPF_2026
-                st.rerun()
-            _an = st.text_area("Tabla Anual pegada (formato Promiedos) — recomendado", height=110, key="lpf_anual",
-                               placeholder="1\nIndependiente Riv.\n35\t17\t29:15\t14\t10\t5\t2\n…")
-            st.caption("De la anual saco solo el Apertura (le resto lo que ya se jugó del Clausura), "
-                       "así la tabla sigue viva fecha a fecha en vez de quedar congelada.")
-            _ap = st.text_area("…o pegá la fase de zonas del APERTURA", height=90, key="lpf_ap",
-                               placeholder="River Plate, 30, 16, +14\nBoca Juniors, 29, 16, +12\n…")
-            _c1 = st.text_input("Campeón del Apertura 2026", value=st.session_state.get("lpf_c1", "Belgrano"), key="lpf_c1")
-            _c2 = st.text_input("Campeón del Clausura 2026 (si ya se definió)", key="lpf_c2")
-            _c3 = st.text_input("Campeón de la Copa Argentina 2026", key="lpf_c3")
-            _x1 = st.text_input("Campeón Libertadores 2026 (si es argentino)", key="lpf_x1",
-                                help="Da una plaza ADICIONAL a Libertadores 2027 (art. 27.9).")
-            _x2 = st.text_input("Campeón Sudamericana 2026 (si es argentino)", key="lpf_x2",
-                                help="Da una plaza ADICIONAL a Libertadores 2027 (art. 27.10).")
-            _na = st.number_input("Descensos por Tabla General", 0, 4, 1, key="lpf_na")
-            _np = st.number_input("Descensos por promedio", 0, 4, 1, key="lpf_np")
-        if st.button("✅ Cargar LPF 2026", use_container_width=True, type="primary"):
-            _ba, _p1, _g1 = parse_tabla_fixture((_za or "") + "\n" + (_fx or ""))
-            _bb, _p2, _g2 = parse_tabla_fixture((_zb or "") + "\n" + (_fx or ""))
-            if len(_ba) < 3 or len(_bb) < 3:
-                st.error("Necesito las dos tablas (Zona A y Zona B), una línea por equipo: «Equipo, Pts, PJ, DG».")
-            else:
-                _Z = {"A": canon_base(_ba), "B": canon_base(_bb)}
-                _ba, _bb = _Z["A"], _Z["B"]
-                if (_an or "").strip():
-                    _anual, _avA = parse_tabla_anual(_an)
-                    _bap, _avD = derivar_apertura(_anual, _Z)
-                    for _a in (_avA + _avD)[:3]:
-                        st.warning(_a)
-                elif (_ap or "").strip():
-                    _bap = parse_tabla_fixture(_ap)[0]
-                else:
-                    _bap = {}
-                _eqs = list(_ba.keys()) + list(_bb.keys())
-                _pend = _p1 or _p2 or []
-                _pares, _ = mapear_fixture(_pend, _eqs) if _pend else ([], [])
-                _gl = _g1 if _g1 is not None else _g2
-                _rest = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0))
-                         for _bz in _Z.values() for e, d in _bz.items()}
-                _anual_dir = st.session_state.get("LPF_ANUAL") or {}
-                if (_an or "").strip():
-                    _anual_dir = parse_tabla_anual(_an)[0]
-                st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqs, zonas_lpf=_Z,
-                                               anual_directo=_anual_dir,
-                                               pendientes=_pares, rest=_rest, apertura=_bap,
-                                               camps=(_c1, _c2, _c3), intl=(_x1, _x2), n_anual=int(_na), n_prom=int(_np),
-                                               base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
-                st.success(f"LPF 2026 cargada: Zona A ({len(_ba)}) y Zona B ({len(_bb)}) ✓")
-                st.rerun()
-        texto_torneo = ""
-
-    elif modo_carga == "Otra liga / copa (avanzado)" and False and "API ESPN (gratis, incluye Liga Argentina)":
-        st.caption("Gratis y sin token. Trae la **tabla** y los **partidos que faltan** (y las zonas sugeridas). "
-                   "Para ligas que no estén en la lista, escribí el código (ej.: `bra.1`, `por.1`).")
-        _lnom = st.selectbox("Liga", list(ESPN_LIGAS.keys()), key="espn_liga_sel")
-        _lcod = st.text_input("Código de liga", value=ESPN_LIGAS.get(_lnom, "arg.1"), key="espn_liga_cod")
-        _ldias = st.number_input("Traer partidos de los próximos (días)", 7, 365, 120, key="espn_dias")
-        if st.button("⚽ Traer de ESPN y cargar", use_container_width=True, type="primary"):
-            with st.spinner("Consultando ESPN…"):
-                _base, _zon, _err = espn_tabla(_lcod)
-            if _err:
-                st.error(_err)
-            else:
-                with st.spinner("Buscando los partidos que faltan…"):
-                    _jg, _pd, _nota, _errf = espn_fixture(_lcod, _ldias)
-                _eqs = list(_base.keys())
-                _pares, _caidos = mapear_fixture(_pd or [], _eqs)
-                _rest = liga_restantes(_eqs, _pares, None) if _pares else {e: 0 for e in _eqs}
-                st.session_state.ESTADO = dict(modo="liga_tabla", equipos=_eqs, base=_base,
-                                               pendientes=_pares, rest=_rest, gleft=None,
-                                               jugados=[], esc=None, mg=0, solo_puntos=True)
-                if _zon and not st.session_state.get("ZONAS"):
-                    st.session_state.ZONAS_TXT = _zon
-                    st.session_state.ZONAS = parse_zonas(_zon)
-                _msg = f"Cargado de ESPN: {len(_eqs)} equipos · {len(_pares)} partidos por jugar"
-                if _errf and not _pares:
-                    _msg += " (sin fixture: revisá los días o pegalo a mano)"
-                st.success(_msg + f" {_nota} ✓")
-                if _caidos:
-                    st.caption("Sin emparejar: " + ", ".join(_caidos[:3]) + ("…" if len(_caidos) > 3 else ""))
-                st.rerun()
-        texto_torneo = ""
-
-    elif modo_carga == "Otra liga / copa (avanzado)" and False and "API football-data.org":
-        token = st.text_input("API Key", value=_secret("FOOTBALL_DATA_TOKEN", ""), type="password",
-                               placeholder="Tu token de football-data.org",
-                               help="Cargala una vez en Secrets (FOOTBALL_DATA_TOKEN) y queda precargada.")
-        comp  = st.text_input("Código torneo", value="WC",
-                              help="Ej.: WC=Mundial, CL=Champions, PL=Premier, PD=LaLiga, SA=Serie A, "
-                                   "BL1=Bundesliga, FL1=Ligue 1, BSA=Brasileirão, PPL=Portugal, "
-                                   "DED=Eredivisie, ELC=Championship. Tocá «Ver torneos» para ver los tuyos.")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🌐 Traer datos", use_container_width=True):
-                if not token:
-                    st.error("Pegá tu API key.")
-                else:
-                    try:
-                        with st.spinner("Trayendo…"):
-                            matches = traer_de_api(token, comp)
-                        st.session_state.texto_torneo_cache = matches_a_texto(matches)
-                        st.success("Datos cargados ✓")
-                    except Exception as e:
-                        st.error(f"Error: {e}")
-        with col2:
-            if st.button("Ver torneos", use_container_width=True):
-                if token:
-                    try:
-                        st.session_state["lista_comps"] = listar_competiciones(token)
-                    except Exception as e:
-                        st.error(str(e))
-        if "lista_comps" in st.session_state:
-            for code, name in st.session_state["lista_comps"]:
-                st.caption(f"`{code}` — {name}")
-        texto_torneo = st.session_state.texto_torneo_cache
-
-    elif modo_carga == "Otra liga / copa (avanzado)" and False and "Pegar tabla + fixture (ligas)":
-        if "liga_tabla_fetch" in st.session_state:
-            st.session_state["liga_tabla_txt"] = st.session_state.pop("liga_tabla_fetch")
-        st.caption("Pegá la **tabla** (una línea por equipo: «Equipo, Pts, PJ, DG»). Abajo, lo ideal es pegar el **fixture** que viene (líneas «River vs Boca») para captar los cruces entre rivales; si no, poné «faltan N fechas» (atajo, no ve los cruces).")
-        with st.expander("🌐 Traer la tabla desde una URL (Wikipedia, gratis)"):
-            _LIGAS = {
-                "— elegir —": "",
-                "Argentina · Tabla acumulada (copas + un descenso)": "https://es.wikipedia.org/wiki/Campeonato_de_Primera_División_2025_(Argentina)",
-                "Argentina · Tabla de promedios (descenso)": "https://es.wikipedia.org/wiki/Campeonato_de_Primera_División_2025_(Argentina)",
-                "Premier League (Inglaterra)": "https://es.wikipedia.org/wiki/Premier_League_2025-26",
-                "La Liga (España)": "https://es.wikipedia.org/wiki/Primera_División_de_España_2025-26",
-                "Serie A (Italia)": "https://es.wikipedia.org/wiki/Serie_A_2025-26",
-                "Brasileirão (Brasil)": "https://es.wikipedia.org/wiki/Campeonato_Brasileño_de_Serie_A_2025",
-            }
-            _lsel = st.selectbox("Liga (rellena el link solo)", list(_LIGAS.keys()), key="liga_preset")
-            if _LIGAS.get(_lsel) and st.session_state.get("_lsel_last") != _lsel:
-                st.session_state["url_tabla"] = _LIGAS[_lsel]
-                st.session_state["_lsel_last"] = _lsel
-                st.rerun()
-            st.caption("Ojo Argentina: la acumulada y la de promedios se leen bien; el fixture de la fecha se pega aparte "
-                       "(o vía Apify). El torneo en curso por zonas no trae partidos legibles desde Wikipedia.")
-            url_tabla = st.text_input("URL de la página con la tabla", key="url_tabla",
-                                      placeholder="https://es.wikipedia.org/wiki/Torneo_… (página del torneo)")
-            if st.button("Leer tabla de la URL", use_container_width=True):
-                txt_t, err_t = tabla_desde_url(url_tabla)
-                if err_t:
-                    st.error(err_t)
-                else:
-                    st.session_state["liga_tabla_fetch"] = txt_t
+            with st.expander("📊 Actualizar histórico a mano (opcional)"):
+                if "lpf_anual_fetch" in st.session_state:
+                    st.session_state["lpf_anual"] = st.session_state.pop("lpf_anual_fetch")
+                if st.button("🇦🇷 Cargar Tabla Anual LPF 2026 (previa a la fecha 2)", use_container_width=True):
+                    st.session_state["lpf_anual_fetch"] = TABLA_ANUAL_LPF_2026
                     st.rerun()
-            if st.button("Leer TODO: resultados + fixture (tabla cruzada) y cargar", use_container_width=True, type="primary"):
-                jg2, pd2, err2, nota2 = partidos_desde_url(url_tabla)
-                if err2:
-                    st.error(err2)
-                elif not jg2 and not pd2:
-                    st.error("La matriz está vacía. Pegá tabla y fixture a mano.")
+                _an = st.text_area("Tabla Anual pegada (formato Promiedos) — recomendado", height=110, key="lpf_anual",
+                                   placeholder="1\nIndependiente Riv.\n35\t17\t29:15\t14\t10\t5\t2\n…")
+                st.caption("De la anual saco solo el Apertura (le resto lo que ya se jugó del Clausura), "
+                           "así la tabla sigue viva fecha a fecha en vez de quedar congelada.")
+                _ap = st.text_area("…o pegá la fase de zonas del APERTURA", height=90, key="lpf_ap",
+                                   placeholder="River Plate, 30, 16, +14\nBoca Juniors, 29, 16, +12\n…")
+                _c1 = st.text_input("Campeón del Apertura 2026", value=st.session_state.get("lpf_c1", "Belgrano"), key="lpf_c1")
+                _c2 = st.text_input("Campeón del Clausura 2026 (si ya se definió)", key="lpf_c2")
+                _c3 = st.text_input("Campeón de la Copa Argentina 2026", key="lpf_c3")
+                _x1 = st.text_input("Campeón Libertadores 2026 (si es argentino)", key="lpf_x1",
+                                    help="Da una plaza ADICIONAL a Libertadores 2027 (art. 27.9).")
+                _x2 = st.text_input("Campeón Sudamericana 2026 (si es argentino)", key="lpf_x2",
+                                    help="Da una plaza ADICIONAL a Libertadores 2027 (art. 27.10).")
+                _na = st.number_input("Descensos por Tabla General", 0, 4, 1, key="lpf_na")
+                _np = st.number_input("Descensos por promedio", 0, 4, 1, key="lpf_np")
+            if st.button("✅ Cargar LPF 2026", use_container_width=True, type="primary"):
+                _ba, _p1, _g1 = parse_tabla_fixture((_za or "") + "\n" + (_fx or ""))
+                _bb, _p2, _g2 = parse_tabla_fixture((_zb or "") + "\n" + (_fx or ""))
+                if len(_ba) < 3 or len(_bb) < 3:
+                    st.error("Necesito las dos tablas (Zona A y Zona B), una línea por equipo: «Equipo, Pts, PJ, DG».")
                 else:
-                    eqs2 = sorted({t for par in (jg2 + pd2) for t in (par[0], par[1])})
-                    base2 = _stats(eqs2, jg2)
-                    rest2 = liga_restantes(eqs2, pd2, None)
-                    st.session_state.ESTADO = dict(modo="liga_tabla", equipos=eqs2, base=base2,
-                                                   pendientes=pd2, rest=rest2, gleft=None,
-                                                   jugados=jg2, esc=None, mg=0, solo_puntos=True)
-                    st.success(f"Cargado desde la matriz: {len(jg2)} resultados y {len(pd2)} por jugar ({nota2}) ✓")
+                    _Z = {"A": canon_base(_ba), "B": canon_base(_bb)}
+                    _ba, _bb = _Z["A"], _Z["B"]
+                    if (_an or "").strip():
+                        _anual, _avA = parse_tabla_anual(_an)
+                        _bap, _avD = derivar_apertura(_anual, _Z)
+                        for _a in (_avA + _avD)[:3]:
+                            st.warning(_a)
+                    elif (_ap or "").strip():
+                        _bap = parse_tabla_fixture(_ap)[0]
+                    else:
+                        _bap = {}
+                    _eqs = list(_ba.keys()) + list(_bb.keys())
+                    _pend = _p1 or _p2 or []
+                    _pares, _ = mapear_fixture(_pend, _eqs) if _pend else ([], [])
+                    _gl = _g1 if _g1 is not None else _g2
+                    _rest = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0))
+                             for _bz in _Z.values() for e, d in _bz.items()}
+                    _anual_dir = st.session_state.get("LPF_ANUAL") or {}
+                    if (_an or "").strip():
+                        _anual_dir = parse_tabla_anual(_an)[0]
+                    st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqs, zonas_lpf=_Z,
+                                                   anual_directo=_anual_dir,
+                                                   pendientes=lpf_pendientes(_Z), rest=_rest, apertura=_bap,
+                                                   camps=(_c1, _c2, _c3), intl=(_x1, _x2), n_anual=int(_na), n_prom=int(_np),
+                                                   base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
+                    st.success(f"LPF 2026 cargada: Zona A ({len(_ba)}) y Zona B ({len(_bb)}) ✓")
                     st.rerun()
-        tabla_txt = st.text_area("Tabla de posiciones", height=170,
-                                 placeholder="River Plate, 31, 14, +12\nBoca Juniors, 28, 14, +7\nRacing, 27, 14, +5\n...",
-                                 key="liga_tabla_txt")
-        fix_txt = st.text_area("Fechas que faltan (o fixture)", height=80,
-                               placeholder="faltan 5 fechas\n— o pegá los partidos: River vs Boca …",
-                               key="liga_fix_txt")
-        if st.button("✅ Cargar liga (tabla)", use_container_width=True, type="primary"):
-            base, pend, gleft = parse_tabla_fixture((tabla_txt or "") + "\n" + (fix_txt or ""))
-            if len(base) >= 3:
-                eqs = list(base.keys()); rest = liga_restantes(eqs, pend, gleft)
-                st.session_state.ESTADO = dict(modo="liga_tabla", equipos=eqs, base=base,
-                                               pendientes=pend, rest=rest, gleft=gleft,
-                                               jugados=[], esc=None, mg=0, solo_puntos=True)
-                st.rerun()
-            else:
-                st.error("No pude leer la tabla. Probá el formato «Equipo, Pts, PJ, DG» (una línea por equipo).")
-        texto_torneo = ""
+            texto_torneo = ""
 
-    elif modo_carga == "Otra liga / copa (avanzado)" and False and "Importar JSON/CSV (Apify u otra fuente)":
-        st.caption("Para ligas que no están en la API. Reconoce `homeTeam/awayTeam/homeScore/awayScore/status/league`: "
-                   "los terminados van como resultados y los programados como fixture.")
-        imp_fil = st.text_input("Filtrar por liga (texto que contenga)", key="imp_fil",
-                                placeholder="ej.: liga profesional / argentina")
-        solo_fix = False
-        if st.session_state.ESTADO and st.session_state.ESTADO.get("modo") == "liga_tabla":
-            solo_fix = st.toggle("Usar solo como fixture de la tabla ya cargada", value=False,
-                                 help="Ideal: tabla pegada a mano + fixture automático. Empareja nombres aunque no coincidan exactos.")
-        with st.expander("⚡ Traer directo de Apify", expanded=True):
-            apify_tok = st.text_input("Apify token", value=_secret("APIFY_TOKEN", ""), type="password",
-                                      help="Gratis en apify.com → Settings → API tokens. Cargalo una vez en Secrets (APIFY_TOKEN).")
-            apify_act = st.text_input("Actor", value="crawlerbros/flashscore-scraper",
-                                      help="También sirve extractify-labs/flashscore-extractor (filtra por fecha −7..+7) o cualquier actor que devuelva partidos.")
-            apify_inp = st.text_area("Input del actor (JSON)", value='{"sport": "football", "liveOnly": false, "maxItems": 500}', height=70)
-            if st.button("🌐 Traer de Apify e importar", use_container_width=True, type="primary"):
-                if not apify_tok:
-                    st.error("Pegá tu token de Apify (o cargalo en Secrets como APIFY_TOKEN).")
+        elif modo_carga == "Otra liga / copa (avanzado)" and False and "API ESPN (gratis, incluye Liga Argentina)":
+            st.caption("Gratis y sin token. Trae la **tabla** y los **partidos que faltan** (y las zonas sugeridas). "
+                       "Para ligas que no estén en la lista, escribí el código (ej.: `bra.1`, `por.1`).")
+            _lnom = st.selectbox("Liga", list(ESPN_LIGAS.keys()), key="espn_liga_sel")
+            _lcod = st.text_input("Código de liga", value=ESPN_LIGAS.get(_lnom, "arg.1"), key="espn_liga_cod")
+            _ldias = st.number_input("Traer partidos de los próximos (días)", 7, 365, 120, key="espn_dias")
+            if st.button("⚽ Traer de ESPN y cargar", use_container_width=True, type="primary"):
+                with st.spinner("Consultando ESPN…"):
+                    _base, _zon, _err = espn_tabla(_lcod)
+                if _err:
+                    st.error(_err)
                 else:
-                    try:
-                        import json as _json
-                        with st.spinner("Corriendo el actor…"):
-                            items = traer_de_apify(apify_tok, apify_act, apify_inp)
-                        jg, pd_, ligas, err = importar_partidos_json(_json.dumps(items), imp_fil)
-                        if err:
-                            st.error(err)
-                        elif _procesar_import(jg, pd_, ligas, imp_fil, solo_fix):
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
-        imp_txt = st.text_area("…o pegá el JSON/CSV exportado", height=140, key="imp_txt",
-                               placeholder='[{"homeTeam":"Lanus","awayTeam":"Banfield","homeScore":1,"awayScore":0,'
-                                           '"status":"finished","league":"ARGENTINA: Liga Profesional"}, …]')
-        if st.button("✅ Importar y cargar", use_container_width=True):
-            jg, pd_, ligas, err = importar_partidos_json(imp_txt, imp_fil)
-            if err:
-                st.error(err)
-            elif _procesar_import(jg, pd_, ligas, imp_fil, solo_fix):
-                st.rerun()
-        texto_torneo = ""
+                    with st.spinner("Buscando los partidos que faltan…"):
+                        _jg, _pd, _nota, _errf = espn_fixture(_lcod, _ldias)
+                    _eqs = list(_base.keys())
+                    _pares, _caidos = mapear_fixture(_pd or [], _eqs)
+                    _rest = liga_restantes(_eqs, _pares, None) if _pares else {e: 0 for e in _eqs}
+                    st.session_state.ESTADO = dict(modo="liga_tabla", equipos=_eqs, base=_base,
+                                                   pendientes=_pares, rest=_rest, gleft=None,
+                                                   jugados=[], esc=None, mg=0, solo_puntos=True)
+                    if _zon and not st.session_state.get("ZONAS"):
+                        st.session_state.ZONAS_TXT = _zon
+                        st.session_state.ZONAS = parse_zonas(_zon)
+                    _msg = f"Cargado de ESPN: {len(_eqs)} equipos · {len(_pares)} partidos por jugar"
+                    if _errf and not _pares:
+                        _msg += " (sin fixture: revisá los días o pegalo a mano)"
+                    st.success(_msg + f" {_nota} ✓")
+                    if _caidos:
+                        st.caption("Sin emparejar: " + ", ".join(_caidos[:3]) + ("…" if len(_caidos) > 3 else ""))
+                    st.rerun()
+            texto_torneo = ""
 
-    else:
-        texto_torneo = st.text_area(
-            "Pegá los resultados",
-            height=200,
-            placeholder="Grupo A\nRiver Plate 1-0 Boca Juniors\nRacing 1-1 Independiente\n...",
-        )
-        if texto_torneo.strip():
-            st.session_state.texto_torneo_cache = texto_torneo
+        elif modo_carga == "Otra liga / copa (avanzado)" and False and "API football-data.org":
+            token = st.text_input("API Key", value=_secret("FOOTBALL_DATA_TOKEN", ""), type="password",
+                                   placeholder="Tu token de football-data.org",
+                                   help="Cargala una vez en Secrets (FOOTBALL_DATA_TOKEN) y queda precargada.")
+            comp  = st.text_input("Código torneo", value="WC",
+                                  help="Ej.: WC=Mundial, CL=Champions, PL=Premier, PD=LaLiga, SA=Serie A, "
+                                       "BL1=Bundesliga, FL1=Ligue 1, BSA=Brasileirão, PPL=Portugal, "
+                                       "DED=Eredivisie, ELC=Championship. Tocá «Ver torneos» para ver los tuyos.")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🌐 Traer datos", use_container_width=True):
+                    if not token:
+                        st.error("Pegá tu API key.")
+                    else:
+                        try:
+                            with st.spinner("Trayendo…"):
+                                matches = traer_de_api(token, comp)
+                            st.session_state.texto_torneo_cache = matches_a_texto(matches)
+                            st.success("Datos cargados ✓")
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+            with col2:
+                if st.button("Ver torneos", use_container_width=True):
+                    if token:
+                        try:
+                            st.session_state["lista_comps"] = listar_competiciones(token)
+                        except Exception as e:
+                            st.error(str(e))
+            if "lista_comps" in st.session_state:
+                for code, name in st.session_state["lista_comps"]:
+                    st.caption(f"`{code}` — {name}")
+            texto_torneo = st.session_state.texto_torneo_cache
 
-    grupos_disponibles = list(dividir_grupos(texto_torneo).keys()) if texto_torneo.strip() else []
+        elif modo_carga == "Otra liga / copa (avanzado)" and False and "Pegar tabla + fixture (ligas)":
+            if "liga_tabla_fetch" in st.session_state:
+                st.session_state["liga_tabla_txt"] = st.session_state.pop("liga_tabla_fetch")
+            st.caption("Pegá la **tabla** (una línea por equipo: «Equipo, Pts, PJ, DG»). Abajo, lo ideal es pegar el **fixture** que viene (líneas «River vs Boca») para captar los cruces entre rivales; si no, poné «faltan N fechas» (atajo, no ve los cruces).")
+            with st.expander("🌐 Traer la tabla desde una URL (Wikipedia, gratis)"):
+                _LIGAS = {
+                    "— elegir —": "",
+                    "Argentina · Tabla acumulada (copas + un descenso)": "https://es.wikipedia.org/wiki/Campeonato_de_Primera_División_2025_(Argentina)",
+                    "Argentina · Tabla de promedios (descenso)": "https://es.wikipedia.org/wiki/Campeonato_de_Primera_División_2025_(Argentina)",
+                    "Premier League (Inglaterra)": "https://es.wikipedia.org/wiki/Premier_League_2025-26",
+                    "La Liga (España)": "https://es.wikipedia.org/wiki/Primera_División_de_España_2025-26",
+                    "Serie A (Italia)": "https://es.wikipedia.org/wiki/Serie_A_2025-26",
+                    "Brasileirão (Brasil)": "https://es.wikipedia.org/wiki/Campeonato_Brasileño_de_Serie_A_2025",
+                }
+                _lsel = st.selectbox("Liga (rellena el link solo)", list(_LIGAS.keys()), key="liga_preset")
+                if _LIGAS.get(_lsel) and st.session_state.get("_lsel_last") != _lsel:
+                    st.session_state["url_tabla"] = _LIGAS[_lsel]
+                    st.session_state["_lsel_last"] = _lsel
+                    st.rerun()
+                st.caption("Ojo Argentina: la acumulada y la de promedios se leen bien; el fixture de la fecha se pega aparte "
+                           "(o vía Apify). El torneo en curso por zonas no trae partidos legibles desde Wikipedia.")
+                url_tabla = st.text_input("URL de la página con la tabla", key="url_tabla",
+                                          placeholder="https://es.wikipedia.org/wiki/Torneo_… (página del torneo)")
+                if st.button("Leer tabla de la URL", use_container_width=True):
+                    txt_t, err_t = tabla_desde_url(url_tabla)
+                    if err_t:
+                        st.error(err_t)
+                    else:
+                        st.session_state["liga_tabla_fetch"] = txt_t
+                        st.rerun()
+                if st.button("Leer TODO: resultados + fixture (tabla cruzada) y cargar", use_container_width=True, type="primary"):
+                    jg2, pd2, err2, nota2 = partidos_desde_url(url_tabla)
+                    if err2:
+                        st.error(err2)
+                    elif not jg2 and not pd2:
+                        st.error("La matriz está vacía. Pegá tabla y fixture a mano.")
+                    else:
+                        eqs2 = sorted({t for par in (jg2 + pd2) for t in (par[0], par[1])})
+                        base2 = _stats(eqs2, jg2)
+                        rest2 = liga_restantes(eqs2, pd2, None)
+                        st.session_state.ESTADO = dict(modo="liga_tabla", equipos=eqs2, base=base2,
+                                                       pendientes=pd2, rest=rest2, gleft=None,
+                                                       jugados=jg2, esc=None, mg=0, solo_puntos=True)
+                        st.success(f"Cargado desde la matriz: {len(jg2)} resultados y {len(pd2)} por jugar ({nota2}) ✓")
+                        st.rerun()
+            tabla_txt = st.text_area("Tabla de posiciones", height=170,
+                                     placeholder="River Plate, 31, 14, +12\nBoca Juniors, 28, 14, +7\nRacing, 27, 14, +5\n...",
+                                     key="liga_tabla_txt")
+            fix_txt = st.text_area("Fechas que faltan (o fixture)", height=80,
+                                   placeholder="faltan 5 fechas\n— o pegá los partidos: River vs Boca …",
+                                   key="liga_fix_txt")
+            if st.button("✅ Cargar liga (tabla)", use_container_width=True, type="primary"):
+                base, pend, gleft = parse_tabla_fixture((tabla_txt or "") + "\n" + (fix_txt or ""))
+                if len(base) >= 3:
+                    eqs = list(base.keys()); rest = liga_restantes(eqs, pend, gleft)
+                    st.session_state.ESTADO = dict(modo="liga_tabla", equipos=eqs, base=base,
+                                                   pendientes=pend, rest=rest, gleft=gleft,
+                                                   jugados=[], esc=None, mg=0, solo_puntos=True)
+                    st.rerun()
+                else:
+                    st.error("No pude leer la tabla. Probá el formato «Equipo, Pts, PJ, DG» (una línea por equipo).")
+            texto_torneo = ""
 
-    if grupos_disponibles:
-        grupo_sel = st.selectbox("📂 Grupo a analizar", grupos_disponibles)
-        if st.button("✅ Cargar grupo", use_container_width=True, type="primary"):
-            texto_grupo = dividir_grupos(texto_torneo).get(grupo_sel, "")
-            eq, jug, pen = parsear_resultados(texto_grupo)
-            if len(eq) >= 3:
-                cargar_estado(eq, jug, pen)
-                st.rerun()
-            else:
-                st.error("No se detectaron suficientes equipos.")
+        elif modo_carga == "Otra liga / copa (avanzado)" and False and "Importar JSON/CSV (Apify u otra fuente)":
+            st.caption("Para ligas que no están en la API. Reconoce `homeTeam/awayTeam/homeScore/awayScore/status/league`: "
+                       "los terminados van como resultados y los programados como fixture.")
+            imp_fil = st.text_input("Filtrar por liga (texto que contenga)", key="imp_fil",
+                                    placeholder="ej.: liga profesional / argentina")
+            solo_fix = False
+            if st.session_state.ESTADO and st.session_state.ESTADO.get("modo") == "liga_tabla":
+                solo_fix = st.toggle("Usar solo como fixture de la tabla ya cargada", value=False,
+                                     help="Ideal: tabla pegada a mano + fixture automático. Empareja nombres aunque no coincidan exactos.")
+            with st.expander("⚡ Traer directo de Apify", expanded=True):
+                apify_tok = st.text_input("Apify token", value=_secret("APIFY_TOKEN", ""), type="password",
+                                          help="Gratis en apify.com → Settings → API tokens. Cargalo una vez en Secrets (APIFY_TOKEN).")
+                apify_act = st.text_input("Actor", value="crawlerbros/flashscore-scraper",
+                                          help="También sirve extractify-labs/flashscore-extractor (filtra por fecha −7..+7) o cualquier actor que devuelva partidos.")
+                apify_inp = st.text_area("Input del actor (JSON)", value='{"sport": "football", "liveOnly": false, "maxItems": 500}', height=70)
+                if st.button("🌐 Traer de Apify e importar", use_container_width=True, type="primary"):
+                    if not apify_tok:
+                        st.error("Pegá tu token de Apify (o cargalo en Secrets como APIFY_TOKEN).")
+                    else:
+                        try:
+                            import json as _json
+                            with st.spinner("Corriendo el actor…"):
+                                items = traer_de_apify(apify_tok, apify_act, apify_inp)
+                            jg, pd_, ligas, err = importar_partidos_json(_json.dumps(items), imp_fil)
+                            if err:
+                                st.error(err)
+                            elif _procesar_import(jg, pd_, ligas, imp_fil, solo_fix):
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+            imp_txt = st.text_area("…o pegá el JSON/CSV exportado", height=140, key="imp_txt",
+                                   placeholder='[{"homeTeam":"Lanus","awayTeam":"Banfield","homeScore":1,"awayScore":0,'
+                                               '"status":"finished","league":"ARGENTINA: Liga Profesional"}, …]')
+            if st.button("✅ Importar y cargar", use_container_width=True):
+                jg, pd_, ligas, err = importar_partidos_json(imp_txt, imp_fil)
+                if err:
+                    st.error(err)
+                elif _procesar_import(jg, pd_, ligas, imp_fil, solo_fix):
+                    st.rerun()
+            texto_torneo = ""
+
+        else:
+            texto_torneo = st.text_area(
+                "Pegá los resultados",
+                height=200,
+                placeholder="Grupo A\nRiver Plate 1-0 Boca Juniors\nRacing 1-1 Independiente\n...",
+            )
+            if texto_torneo.strip():
+                st.session_state.texto_torneo_cache = texto_torneo
+
+        grupos_disponibles = list(dividir_grupos(texto_torneo).keys()) if texto_torneo.strip() else []
+
+        if grupos_disponibles:
+            grupo_sel = st.selectbox("📂 Grupo a analizar", grupos_disponibles)
+            if st.button("✅ Cargar grupo", use_container_width=True, type="primary"):
+                texto_grupo = dividir_grupos(texto_torneo).get(grupo_sel, "")
+                eq, jug, pen = parsear_resultados(texto_grupo)
+                if len(eq) >= 3:
+                    cargar_estado(eq, jug, pen)
+                    st.rerun()
+                else:
+                    st.error("No se detectaron suficientes equipos.")
 
     if st.session_state.ESTADO:
         E = st.session_state.ESTADO
@@ -3839,21 +4313,20 @@ with st.sidebar:
 
 # ─── MAIN TABS ───────────────────────────────────────────────────────────────────
 if not st.session_state.ESTADO:
-    st.info("👈 Cargá el **Torneo Clausura 2026** desde el panel (viene seleccionado por defecto), "
-            "o traelo automático de ESPN con un botón.")
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("⚡ Traer el Clausura de ESPN (automático)", type="primary", use_container_width=True):
-            with st.spinner("Consultando ESPN…"):
+    st.info("\U0001F449 Todav\u00eda no cargaste datos. Toc\u00e1 el bot\u00f3n para cargar el Clausura 2026 completo (o tra\u00e9lo de ESPN).")
+    if st.button("\U0001F4E5 Cargar TODO (Clausura + Anual + Promedios)", type="primary", use_container_width=True, key="btn_cargar_todo_main"):
+        cargar_lpf_todo()
+        st.rerun()
+    with st.expander("\u2026o traerlo autom\u00e1tico de ESPN"):
+        if st.button("\u26a1 Traer el Clausura de ESPN (autom\u00e1tico)", use_container_width=True, key="btn_espn_main"):
+            with st.spinner("Consultando ESPN\u2026"):
                 _Zx, _errx = espn_lpf_zonas("arg.1")
             if _errx:
                 st.error(_errx)
             else:
                 _jx, _px, _nx, _efx = espn_fixture("arg.1", 120)
                 _eqx = [e for b in _Zx.values() for e in b]
-                _parx, _ = mapear_fixture(_px or [], _eqx)
-                _rx = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0))
-                       for _bz in _Zx.values() for e, d in _bz.items()}
+                _rx = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0)) for _bz in _Zx.values() for e, d in _bz.items()}
                 if not st.session_state.get("LPF_ANUAL"):
                     st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
                     _pv0 = parse_promedios_tabla(PROMEDIOS_LPF_2026)[0]
@@ -3862,13 +4335,10 @@ if not st.session_state.ESTADO:
                     st.session_state.LPF_HIST_OK = f"{len(st.session_state.LPF_ANUAL)} equipos en la anual"
                 st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqx, zonas_lpf=_Zx,
                                                anual_directo=st.session_state.get("LPF_ANUAL") or {},
-                                               pendientes=_parx, rest=_rx, apertura={},
+                                               pendientes=lpf_pendientes(_Zx), rest=_rx, apertura={},
                                                camps=(st.session_state.get("lpf_c1", "Belgrano"), "", ""), intl=("", ""), n_anual=1, n_prom=1,
                                                base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
                 st.rerun()
-    with c2:
-        st.caption("Si ESPN no trae las zonas separadas, pegá las tablas en el panel: "
-                   "es 1 minuto y es lo más confiable.")
     st.stop()
 
 E = st.session_state.ESTADO
@@ -4044,7 +4514,7 @@ def _router_lpf(acc, E):
         return [("warning", "Para las copas necesito la **Tabla Anual real**. Tocá «📦 Cargar Tabla Anual + Promedios» en el panel.")]
     if intent == "copas":
         if equipo:
-            return [("md", lpf_copas_necesita_texto(equipo, Z, rest, ap, (c1, c2, c3), (xl, xs))),
+            return [("md", lpf_copas_necesita_texto(equipo, Z, rest, ap, (c1, c2, c3), (xl, xs), pend)),
                     ("df", lpf_anual_df(Z, ap), "Tabla General 2026")]
         return [("md", lpf_copas_texto(Z, ap, c1, c2, c3, xl, xs)),
                 ("df", lpf_anual_df(Z, ap), "Tabla General 2026 (Apertura + Clausura)")]
@@ -4056,7 +4526,7 @@ def _router_lpf(acc, E):
         out.append(("md", "_El 1º de esta tabla es el **Campeón de Liga 2026** (art. 24.2)._"))
         return out
     if intent in ("promedios", "descenso"):
-        out = [("md", lpf_descenso_texto(Z, rest, ap, prev, na, npro, equipo))]
+        out = [("md", lpf_descenso_texto(Z, rest, ap, prev, na, npro, equipo, pend))]
         out.append(("df", promedios_df(anual, rest, prev), "Promedios (piso = perdiendo todo · techo = ganando todo)"))
         out.append(("df", lpf_anual_df(Z, ap), "Tabla General 2026"))
         return out
@@ -4076,9 +4546,9 @@ def _router_lpf(acc, E):
             return [("warning", "Decime el equipo. Ej.: «qué necesita River para los playoffs».")]
         qn = _zlow(q)
         if any(w in qn for w in ("descenso", "descender", "promedio", "bajar", "salvar", "permanencia")):
-            return [("md", lpf_descenso_texto(Z, rest, ap, prev, na, npro, equipo))]
+            return [("md", lpf_descenso_texto(Z, rest, ap, prev, na, npro, equipo, pend))]
         if any(w in qn for w in ("libertadores", "sudamericana", "copa")):
-            return [("md", lpf_copas_necesita_texto(equipo, Z, rest, ap, (c1, c2, c3), (xl, xs)))]
+            return [("md", lpf_copas_necesita_texto(equipo, Z, rest, ap, (c1, c2, c3), (xl, xs), pend))]
         lab = lpf_zona_de_equipo(equipo, Z)
         out = [("md", lpf_playoffs_texto(equipo, Z, rest, pend))]
         if lab:
