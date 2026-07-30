@@ -3970,6 +3970,40 @@ def cargar_lpf_todo():
     return len(_Zc["A"]), len(_Zc["B"]), len(st.session_state.get("LPF_ANUAL") or {}), len(_pend)
 
 
+def cargar_lpf_espn(liga="arg.1"):
+    """Refresco EN VIVO desde ESPN: tablas por zona con los PJ al día + resultados
+    partido a partido (para forma/rachas). El histórico (Anual + Promedios) se toma
+    de las constantes si no está cargado. Devuelve (resumen_dict, error)."""
+    Zx, err = espn_lpf_zonas(liga)
+    if err:
+        return None, err
+    jug_raw, pen_raw, nota, ferr = espn_fixture(liga, 120)
+    eqx = [e for b in Zx.values() for e in b]
+    eqset = set(eqx)
+    jugados = []
+    for (ln, vn, gl, gv) in (jug_raw or []):
+        cl, cv = canon_club(ln), canon_club(vn)
+        if cl in eqset and cv in eqset:
+            jugados.append((cl, cv, gl, gv))
+    restx = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0)) for b in Zx.values() for e, d in b.items()}
+    if not st.session_state.get("LPF_ANUAL"):
+        st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
+        _pv0 = parse_promedios_tabla(PROMEDIOS_LPF_2026)[0]
+        st.session_state.PROM_TXT = promedios_previas_texto(_pv0)
+        st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
+    _pend = lpf_pendientes(Zx)
+    st.session_state.ESTADO = dict(modo="lpf2026", equipos=eqx, zonas_lpf=Zx,
+                                   anual_directo=st.session_state.get("LPF_ANUAL") or {},
+                                   pendientes=_pend, rest=restx, apertura={},
+                                   camps=(st.session_state.get("lpf_c1", "Belgrano"),
+                                          st.session_state.get("lpf_c2", ""),
+                                          st.session_state.get("lpf_c3", "")),
+                                   intl=("", ""), n_anual=1, n_prom=1,
+                                   base={}, jugados=jugados, esc=None, mg=0, solo_puntos=True)
+    return {"A": len(Zx.get("A", {})), "B": len(Zx.get("B", {})),
+            "jug": len(jugados), "pend": len(_pend), "nota": nota or "", "fixture_err": ferr or ""}, None
+
+
 # ─── SIDEBAR ─────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("🔧 Configuración")
@@ -4050,6 +4084,17 @@ with st.sidebar:
         st.rerun()
     st.caption("Incluye Zonas A y B, Tabla Anual y Promedios (datos internos, **previo a la fecha 2 del Clausura 2026**) "
                "y el **fixture completo de las 16 fechas** para los cruces mano a mano.")
+    if st.button("\U0001F504 Actualizar a hoy (ESPN)", use_container_width=True, key="btn_espn_refresh_side"):
+        with st.spinner("Trayendo tablas y resultados de ESPN\u2026"):
+            _r, _e = cargar_lpf_espn("arg.1")
+        if _e:
+            st.warning(_e + "  \u2014 mientras tanto podés pegar las tablas en «Otras formas de cargar».")
+        else:
+            st.success(f"Actualizado desde ESPN \u2713 Zona A ({_r['A']}) \u00b7 Zona B ({_r['B']}) \u00b7 "
+                       f"{_r['jug']} resultados \u00b7 {_r['pend']} pendientes")
+            st.rerun()
+    st.caption("Trae las tablas con los **PJ al día** y los **resultados** (forma y rachas) en un clic. "
+               "_La Tabla Anual (copas/descenso) se actualiza aparte en «Otras formas de cargar»._")
     with st.expander("\U0001F6E0\ufe0f Otras formas de cargar o editar a mano (avanzado)", expanded=False):
         modo_carga = st.radio("Fuente", ["🇦🇷 LPF 2026 (Clausura: zonas A y B)", "Otra liga / copa (avanzado)"], label_visibility="collapsed")
 
@@ -4058,27 +4103,11 @@ with st.sidebar:
                        "a Octavos. La **Tabla General** (para copas y descenso) suma Apertura + Clausura.")
             if st.button("⚡ Traer el Clausura de ESPN (automático)", use_container_width=True):
                 with st.spinner("Consultando ESPN…"):
-                    _Zx, _errx = espn_lpf_zonas("arg.1")
-                if _errx:
-                    st.warning(_errx)
+                    _r, _e = cargar_lpf_espn("arg.1")
+                if _e:
+                    st.warning(_e)
                 else:
-                    _jx, _px, _nx, _efx = espn_fixture("arg.1", 120)
-                    _eqx = [e for b in _Zx.values() for e in b]
-                    _parx, _ = mapear_fixture(_px or [], _eqx)
-                    _rx = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0))
-                           for _bz in _Zx.values() for e, d in _bz.items()}
-                    if not st.session_state.get("LPF_ANUAL"):
-                        st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
-                        _pv0 = parse_promedios_tabla(PROMEDIOS_LPF_2026)[0]
-                        st.session_state.PROM_TXT = promedios_previas_texto(_pv0)
-                        st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
-                        st.session_state.LPF_HIST_OK = f"{len(st.session_state.LPF_ANUAL)} equipos en la anual"
-                    st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqx, zonas_lpf=_Zx,
-                                                   anual_directo=st.session_state.get("LPF_ANUAL") or {},
-                                                   pendientes=lpf_pendientes(_Zx), rest=_rx, apertura={},
-                                                   camps=(st.session_state.get("lpf_c1", "Belgrano"), "", ""), intl=("", ""), n_anual=1, n_prom=1,
-                                                   base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
-                    st.success(f"Cargado de ESPN: Zona A ({len(_Zx.get('A',{}))}) y Zona B ({len(_Zx.get('B',{}))}) ✓")
+                    st.success(f"Cargado de ESPN: Zona A ({_r['A']}) y Zona B ({_r['B']}) · {_r['jug']} resultados ✓")
                     st.rerun()
             _za = st.text_area("Tabla Zona A", height=130, key="lpf_a",
                                placeholder="River Plate, 28, 12, +11\nBoca Juniors, 25, 12, +7\n…")
@@ -4407,24 +4436,10 @@ if not st.session_state.ESTADO:
     with st.expander("\u2026o traerlo autom\u00e1tico de ESPN"):
         if st.button("\u26a1 Traer el Clausura de ESPN (autom\u00e1tico)", use_container_width=True, key="btn_espn_main"):
             with st.spinner("Consultando ESPN\u2026"):
-                _Zx, _errx = espn_lpf_zonas("arg.1")
-            if _errx:
-                st.error(_errx)
+                _r, _e = cargar_lpf_espn("arg.1")
+            if _e:
+                st.error(_e)
             else:
-                _jx, _px, _nx, _efx = espn_fixture("arg.1", 120)
-                _eqx = [e for b in _Zx.values() for e in b]
-                _rx = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0)) for _bz in _Zx.values() for e, d in _bz.items()}
-                if not st.session_state.get("LPF_ANUAL"):
-                    st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
-                    _pv0 = parse_promedios_tabla(PROMEDIOS_LPF_2026)[0]
-                    st.session_state.PROM_TXT = promedios_previas_texto(_pv0)
-                    st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
-                    st.session_state.LPF_HIST_OK = f"{len(st.session_state.LPF_ANUAL)} equipos en la anual"
-                st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqx, zonas_lpf=_Zx,
-                                               anual_directo=st.session_state.get("LPF_ANUAL") or {},
-                                               pendientes=lpf_pendientes(_Zx), rest=_rx, apertura={},
-                                               camps=(st.session_state.get("lpf_c1", "Belgrano"), "", ""), intl=("", ""), n_anual=1, n_prom=1,
-                                               base={}, jugados=[], esc=None, mg=0, solo_puntos=True)
                 st.rerun()
     st.stop()
 
