@@ -549,6 +549,44 @@ def liga_duelos_texto(base, rest, pend, zonas):
     L.append("\n_Estos son los partidos donde un rival le saca puntos directos al otro: valen doble en la pelea._")
     return "\n\n".join(L)
 
+def _opciones_liga(equipo, base, rest, pend, k, nombre, linea=None):
+    """Caminos además del piso seguro: (1) los rivales que pelean el corte y su máximo
+    posible ('terminar por encima de'); (2) el mano a mano — cuánto baja tu piso si les
+    ganás a los rivales directos. Adaptativo: detalla cuando son pocos cruces, resume
+    cuando son muchos. Riguroso (fuerza tus victorias y recalcula con _linea_garantia)."""
+    if not pend:
+        return []
+    pts = {e: base[e]["pts"] for e in base}
+    pmax = {e: pts[e] + 3 * rest.get(e, 0) for e in base}
+    if linea is None:
+        linea = _linea_garantia(base, rest, pend, equipo, k)
+    F = linea + 1
+    otros = sorted(((x, pmax[x]) for x in base if x != equipo), key=lambda kv: -kv[1])
+    L = []
+    # (1) rivales al borde del corte (los que realmente disputan el puesto)
+    lo = max(0, k - 3); hi = min(len(otros), k + 2)
+    borde = otros[lo:hi]
+    if borde:
+        lst = ", ".join(f"{x} (máx {m})" for x, m in borde)
+        L.append(f"📊 **El corte de {nombre} lo disputan:** {lst}. Para asegurar sin depender tenés que quedar "
+                 f"por encima de suficientes de ellos; con menos que el piso seguro entrás igual si se quedan cortos "
+                 f"(mirá «chances de {equipo}» o «qué le conviene a {equipo}»).")
+    # (2) mano a mano: detalle si son pocos, resumen si son muchos
+    enpelea = {x for x in base if x != equipo and _liga_in_out(x, base, rest, k) == "pelea"}
+    h2h = [(b if a == equipo else a) for (a, b) in pend if equipo in (a, b) and (b if a == equipo else a) in enpelea]
+    if h2h:
+        rest2 = dict(rest)
+        for r in h2h:
+            rest2[r] = max(0, rest2.get(r, 0) - 1)
+        F2 = _linea_garantia(base, rest2, pend, equipo, k) + 1
+        if len(h2h) <= 5 and F2 < F:
+            L.append(f"🔑 **Mano a mano:** si les ganás a {', '.join(h2h)}, tu piso seguro baja de {F} a **{F2}** "
+                     f"(sumás vos y ellos no).")
+        else:
+            L.append(f"🔑 **Mano a mano:** te quedan {len(h2h)} cruces con rivales directos; ganarlos baja tu piso "
+                     f"y los deja sin sumar. Pesa más en las últimas fechas, cuando la tabla se separa.")
+    return L
+
 def liga_que_necesita_texto(equipo, base, rest, zonas, texto, pend=None):
     pts = {e: base[e]["pts"] for e in base}; pmax = {e: pts[e] + 3 * rest.get(e, 0) for e in base}
     orden = liga_tabla_df(base); pos = int(orden.set_index("Equipo").loc[equipo, "Pos"])
@@ -582,6 +620,8 @@ def liga_que_necesita_texto(equipo, base, rest, zonas, texto, pend=None):
         else:
             L.append(f"No le alcanza por sí solo: necesitaría {necesita} pts y solo hay {3*gx} en juego → "
                      f"tiene que ganar lo suyo **y** que los rivales pinchen.")
+        if pend and necesita > 0:
+            L.extend(_opciones_liga(equipo, base, rest, pend, k, nombre, linea))
     if pend:
         mios = [(a, b) for (a, b) in pend if equipo in (a, b)]
         if mios:
@@ -4558,6 +4598,7 @@ AYUDA_MD = """**Todo esto funciona escribiéndolo (no hace falta el asistente Cl
 - *Árbol de River* — flowchart si/entonces: gana → clasifica, empata → depende, etc. (placa)
 - *Qué se juega cada equipo* — un renglón por equipo de todo el grupo, para placa o copete (placa)
 - *Previa de la fecha* — qué define cada partido que falta y qué pasa con cada resultado (texto + placa)
+- *Previa de River* (o *cómo puede terminar la fecha para River*) — su partido y entre qué puestos puede terminar la fecha, en playoffs/copas/descenso según le toque
 - *Proyección* — cuántos puntos junta cada uno si mantiene su ritmo (tabla)
 - *Ficha de River* — pts, ritmo, forma, racha, local/visitante, rivales que quedan y dificultad
 - *Forma* / *Racha* — tabla de últimos 5 · *De local y de visitante* — rendimiento por condición
@@ -5091,52 +5132,56 @@ def _router_lpf(acc, E):
 
 AYUDA_LPF = """### ⚽ Calculadora LPF 2026 — guía de uso
 
-**Cómo cargar los datos**
-1. Panel izquierdo → **«🇦🇷 Cargar Zonas A y B del Clausura 2026»**. Ese botón trae todo junto: las dos zonas, la Tabla Anual y los promedios.
-2. Para actualizar después de cada fecha: **«⚡ Traer de ESPN»** (automático) o pegá las tablas de Promiedos y tocá «✅ Cargar LPF 2026».
-3. La app te avisa sola si tus datos quedaron viejos o si hay una fecha en curso.
+**Cómo cargar y actualizar los datos**
+1. Botón grande **«📥 Cargar TODO»** — trae de una las dos zonas, la Tabla Anual, los promedios, el fixture de las 16 fechas y los resultados de la fecha 1 (datos internos, sirve sin internet).
+2. **«🔄 Actualizar a hoy (ESPN)»** — una vez por fecha: baja las tablas con los PJ del día **y** los resultados partido a partido (para forma y rachas). Si ESPN no separa las zonas, caés al pegado manual.
+3. En **«🛠️ Otras formas de cargar»**: pegar las tablas de Promiedos, editar el histórico, y **«🥅 Resultados partido a partido»** para pegar/actualizar marcadores a mano.
+4. La app te avisa sola si los datos quedaron viejos o si hay una fecha en curso.
 
 ---
 
 ### 🏆 Playoffs (entran los 8 primeros de cada zona)
-- **¿Qué necesita River para los playoffs?** — la cuenta exacta, con los cruces mano a mano y el «🔍 por qué»
-- **Tabla** — las dos zonas con la línea de clasificación
-- **Octavos** — cómo quedarían los 8 cruces si terminara hoy (1ºA-8ºB, 1ºB-8ºA…)
+- **¿Qué necesita River para los playoffs?** — la cuenta con el **piso seguro**, los **mano a mano**, las **opciones** (con cuánto entrás si les ganás a los de arriba, o terminando por encima de tal rival) y el «🔍 por qué»
+- **Tabla** — las dos zonas con la línea de clasificación · **Octavos** — los 8 cruces si terminara hoy
 - **Relato de la zona** — el panorama escrito, listo para la nota
-- **Probabilidades** — % de entrar a los playoffs por simulación
-- **Previa de la fecha** — probabilidad estimada de cada partido de la próxima fecha
-- **Árbol de River** — cómo cambian sus chances de octavos según gane, empate o pierda el próximo; marca el **partido bisagra**
+- **Probabilidades** (o «chances de River») — % de entrar a los playoffs por simulación
 - **Proyección** — con cuántos puntos termina cada uno si mantiene el ritmo
-- _También:_ ¿quién clasifica hoy? · ¿cuántos puntos necesita Boca? · ¿está eliminado X? · máximos
+- _También:_ ¿quién clasifica hoy? · ¿está eliminado X? · máximos
 
 ### 📉 Descenso (bajan 2: uno por promedios y otro por la anual)
 - **Descenso** — quiénes se irían hoy por cada tabla, con la regla si el mismo es último en las dos
-- **¿Se salva Aldosivi?** — análisis exacto por promedio y por anual, con piso y techo
+- **¿Se salva Aldosivi?** — exacto por promedio y por anual, con piso, techo y **opciones** (mano a mano incluido)
 - **Promedios** — la tabla completa con PROMEDIO, piso y techo
 - _También:_ ¿quién se salva? · ¿quién está en riesgo? · zona de descenso
 
 ### 🌎 Copas 2027
 - **Copas** — cómo quedan las plazas de Libertadores y Sudamericana
-- **¿River llega a la Libertadores?** — tu puesto en la tabla **sin campeones**, que es la que define
-- **Anual** — la Tabla General 2026 (su 1º es el Campeón de Liga)
-- _También:_ ¿quién juega la Libertadores? · ¿quiénes van a la Sudamericana?
+- **¿River llega a la Libertadores?** — tu puesto en la tabla **sin campeones**, con piso y **opciones**
+- **Anual** — la Tabla General 2026 (su 1º es Campeón de Liga)
+- _También:_ ¿quiénes van a la Sudamericana?
+
+### 🎯 Previa y escenarios por equipo
+- **Previa de River** (o «cómo puede terminar la fecha para River») — su partido y **entre qué puestos puede terminar la fecha**, en playoffs, copas y/o descenso según le corresponda. Rango **exacto** para la fecha.
+- **¿Qué le conviene a River?** (o «la otra cancha», «para quién hinchar») — qué resultado de cada partido de sus rivales le sirve, por simulación
+- **Árbol de River** — cómo cambian sus chances según gane, empate o pierda el próximo; marca el **partido bisagra**
+- **Previa de la fecha** — probabilidad estimada de cada partido de la próxima fecha (todos los partidos)
 
 ### 🔎 Por equipo
 - **Ficha de River** — puesto, ritmo, DG, rivales que le quedan y dificultad
-- **Comparar River y Boca** — cara a cara (avisa si están en zonas distintas)
-- **Calendario** — qué tan bravo es el fixture de cada uno
-- **¿Contra quién juega River?** — los rivales que le restan
+- **Forma de River** / **racha de Boca** — los últimos 5 y la racha (requiere resultados cargados)
+- **De local y de visitante** — rendimiento por condición
+- **Comparar River y Boca** — cara a cara · **Calendario** — qué tan bravo es el fixture · **¿Contra quién juega River?**
 
 ### 🔴 Control de datos
-- **Estado de la fecha** — quién ya jugó y está tomado, quién no, y los partidos de estos días con resultado (en vivo desde ESPN)
-- **¿Está actualizado?** — compara lo cargado con el calendario oficial del torneo
+- **Estado de la fecha** — quién ya jugó y está tomado, y los partidos de estos días (en vivo desde ESPN)
+- **¿Está actualizado?** — compara lo cargado con el calendario oficial
 - Después de casi cualquier respuesta: **¿por qué?** — te desarma la cuenta paso a paso
 
 ---
 
-_Todo se calcula en Python con los datos cargados: los veredictos («ya está», «quedó afuera», puntos que faltan) son **exactos**, y lo que es estimación (probabilidades, proyección) va siempre rotulado como tal. Nada lo escribe una IA por su cuenta._
+_Todo se calcula en Python con los datos cargados: los veredictos («ya está», «quedó afuera», puntos que faltan, mejor/peor puesto de la fecha) son **exactos**, y lo que es estimación (probabilidades, árbol, qué conviene, previa por partido) va siempre rotulado como tal. Nada lo escribe una IA por su cuenta._
 
-_El árbol y la previa se calculan **por simulación** (no enumerando marcador por marcador): son estimaciones rotuladas como tales. Cuando queden muy pocas fechas, la simulación es prácticamente exacta._"""
+_El piso es una **cota segura** que ya descuenta los mano a mano. El árbol, las chances y «qué conviene» son **por simulación** (no enumeran marcador por marcador); cuando quedan pocas fechas, se vuelven prácticamente exactos. La previa por equipo (mejor/peor puesto) es exacta para la fecha._"""
 
 
 def _router_liga_tabla(acc, E):
