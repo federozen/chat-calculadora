@@ -7077,6 +7077,30 @@ def render_newsroom(E):
             cutoff = max(1, len(base) - 1)
         st.markdown(exact)
 
+        with st.expander("🔍 Control rápido: ¿los datos coinciden con la tabla oficial?", expanded=(_niv != "ok")):
+            st.caption("Compará estas 6 líneas con Promiedos. Si no coinciden, los informes van a estar mal: "
+                       "cargá los resultados que faltan en la pestaña **Cargar resultados**.")
+            _cc1, _cc2 = st.columns(2)
+            with _cc1:
+                st.markdown("**Tabla Anual (top 6)**")
+                _ord_an = sorted(annual.items(), key=lambda kv: (-kv[1].get("pts", 0), -kv[1].get("dg", 0)))
+                for _i, (_e, _d) in enumerate(_ord_an[:6], 1):
+                    st.markdown(f"{_i}. {_e} — **{_d.get('pts',0)}** pts ({_d.get('pj',0)} PJ, DG {_d.get('dg',0):+d})")
+            with _cc2:
+                st.markdown(f"**{team}**")
+                _p_an = 1 + sum(1 for _x, _d in annual.items() if _x != team and
+                                (_d.get("pts", 0), _d.get("dg", 0)) >
+                                (annual.get(team, {}).get("pts", 0), annual.get(team, {}).get("dg", 0)))
+                _lab_z = lpf_zona_de_equipo(team, Z)
+                _bz = Z.get(_lab_z or "", {})
+                _p_z = 1 + sum(1 for _x, _d in _bz.items() if _x != team and
+                               (_d.get("pts", 0), _d.get("dg", 0)) >
+                               (_bz.get(team, {}).get("pts", 0), _bz.get(team, {}).get("dg", 0)))
+                st.markdown(f"- Anual: **{_p_an}º** con {annual.get(team, {}).get('pts', 0)} pts "
+                            f"({annual.get(team, {}).get('pj', 0)} PJ)")
+                if _bz:
+                    st.markdown(f"- Zona {_lab_z}: **{_p_z}º** con {_bz.get(team, {}).get('pts', 0)} pts "
+                                f"({_bz.get(team, {}).get('pj', 0)} PJ)")
         if _niv != "ok":
             st.error("🔴 **Este informe está calculado con datos incompletos o desactualizados, así que los números "
                      "pueden ser incorrectos.** " + "Falta: " + "; ".join(_faltan) +
