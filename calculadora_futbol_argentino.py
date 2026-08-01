@@ -5276,7 +5276,14 @@ def _rango_puesto_fecha(target, tabla, score_after, games):
     """
     base = {e: {"pts": int(score_after(e, 0)[0] if isinstance(score_after(e, 0), tuple)
                                   else score_after(e, 0))} for e in tabla}
-    return next_round_rank_bounds(target, base, games)
+    r = next_round_rank_bounds(target, base, games)
+    if not r:
+        return r
+    # Red de seguridad: ningún puesto puede caer fuera de 1..N. Si pasa, hay un
+    # equipo contado dos veces (por ejemplo, si `games` trae partidos de dos fechas).
+    n = len(base)
+    b, w = r
+    return max(1, min(b, n)), max(1, min(w, n))
 
 
 def _rango_puesto_fecha_score(target, tabla, score_after, games):
@@ -5339,13 +5346,27 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None):
     prox, _jg, _atr = lpf_jornada_actual(pend, forzar=fecha)
     if prox is None:
         return None, None
-    games = list(_jg) + [lv for lv, _f in _atr]   # la jornada + los postergados que se juegan ahora
+    # El rango de puestos exige que cada equipo juegue A LO SUMO UNA VEZ (el cálculo es
+    # separable por partido). Si sumáramos la jornada + los postergados, un equipo que
+    # juega en las dos ventanas se contaría dos veces y el puesto se iría de rango.
+    games = list(_jg)
+    _dobles = []
+    _en_jornada = {x for lv in _jg for x in lv}
+    for lv, _f in _atr:
+        if lv[0] in _en_jornada or lv[1] in _en_jornada:
+            _dobles.append(lv)
+        else:
+            games.append(lv)
     _etq = lpf_etiqueta_jornada(prox, _atr)
     _atraso = lpf_equipos_con_atraso(pend)
 
     L = [f"**Previa de la {_etq} para {equipo}** — cómo puede terminar la fecha."]
     if _atr:
-        L.append(f"⚠️ Hay {len(_atr)} partido(s) postergado(s) que se juegan en esta ventana: los incluyo en el cálculo.")
+        L.append(f"⚠️ Hay {len(_atr)} partido(s) postergado(s) de fechas anteriores en esta ventana.")
+    if _dobles:
+        _eqd = sorted({x for lv in _dobles for x in lv})
+        L.append(f"El rango de abajo cuenta **un partido por equipo**. Estos juegan dos veces en esta ventana "
+                 f"({', '.join(_eqd)}), así que pueden sumar hasta 3 puntos más de lo que refleja el rango.")
     if _atraso.get(equipo):
         L.append(f"⚠️ **{equipo} tiene {_atraso[equipo]} partido(s) pendiente(s) de fechas anteriores**: juega menos que el resto, "
                  f"así que su posición en la tabla se lee con esa salvedad (puede sumar de más).")
