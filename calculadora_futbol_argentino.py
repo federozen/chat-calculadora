@@ -4331,6 +4331,48 @@ def _fuerza_lpf(base, jugados=None):
     return {e: min(1.8, max(0.4, mix[e] / med)) for e in eqs}
 
 
+LPF_APERTURA_PJ = 16   # el Apertura 2026 tuvo 16 fechas: su tabla es fija para los 30
+
+def lpf_apertura_desde_anual(anual, zonas, jugados=None, games=None):
+    """Deriva la tabla FIJA del Apertura a partir de la Anual cargada.
+
+    El Apertura terminó, así que su tabla no cambia más. Guardándola, la Anual se
+    recalcula siempre como Apertura + zonas actuales y ya no puede quedar vieja
+    respecto de las zonas (origen de varios números incorrectos).
+
+    Ojo: la Anual cargada puede incluir sólo parte del Clausura. Por eso no se resta
+    la zona entera, sino únicamente los partidos de Clausura que la Anual sí incorporó
+    (`anual_pj - 16`), tomados de los resultados conocidos.
+    """
+    games = games or LPF_FIXTURE
+    fmap = {(g["l"], g["v"]): g["f"] for g in games}
+    porfecha = {}
+    for (l, v, gl, gv) in (jugados or []):
+        f = fmap.get((l, v))
+        if f is None:
+            continue
+        porfecha.setdefault(l, []).append((f, gl, gv))
+        porfecha.setdefault(v, []).append((f, gv, gl))
+    ap = {}
+    for lab, base in (zonas or {}).items():
+        for e in base:
+            a = (anual or {}).get(e)
+            if not a:
+                continue
+            n_inc = int(a.get("pj", 0)) - LPF_APERTURA_PJ      # partidos de Clausura ya sumados
+            pts = int(a.get("pts", 0)); pj = int(a.get("pj", 0))
+            gf = int(a.get("gf", 0)); ga = int(a.get("ga", 0))
+            if n_inc > 0:
+                mios = sorted(porfecha.get(e, []))[:n_inc]
+                for (_f, favor, contra) in mios:
+                    pts -= 3 if favor > contra else (1 if favor == contra else 0)
+                    pj -= 1; gf -= favor; ga -= contra
+                if len(mios) < n_inc:                # faltan resultados para restar
+                    ap[e] = {"pts": pts, "pj": pj, "dg": gf - ga, "gf": gf, "ga": ga, "_dudoso": True}
+                    continue
+            ap[e] = {"pts": pts, "pj": pj, "dg": gf - ga, "gf": gf, "ga": ga}
+    return ap
+
 def cargar_lpf_todo():
     """Carga offline completa desde las constantes internas: Tabla Anual + Promedios
     + Zonas A y B + fixture de las 16 fechas. Devuelve (nA, nB, nAnual, nPend)."""
@@ -4347,9 +4389,11 @@ def cargar_lpf_todo():
     _restc = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0)) for b in _Zc.values() for e, d in b.items()}
     _pend = lpf_pendientes(_Zc)
     _jug = parse_resultados_lpf(st.session_state.get("LPF_RES_TXT") or None)
+    _anual_snap = st.session_state.get("LPF_ANUAL") or {}
+    _ap = lpf_apertura_desde_anual(_anual_snap, _Zc, _jug)
     st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqc, zonas_lpf=_Zc,
-                                   anual_directo=st.session_state.get("LPF_ANUAL") or {},
-                                   pendientes=_pend, rest=_restc, apertura={},
+                                   anual_directo={},          # la Anual se DERIVA: Apertura + zonas
+                                   pendientes=_pend, rest=_restc, apertura=_ap,
                                    camps=(st.session_state.get("lpf_c1", "Belgrano"),
                                           st.session_state.get("lpf_c2", ""),
                                           st.session_state.get("lpf_c3", "")),
