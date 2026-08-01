@@ -5386,6 +5386,11 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None):
     b, w = _rango_puesto_fecha(equipo, set(base), sz, games)
     filas.append({"Objetivo": f"Playoffs · Zona {lab} (entran 8)", "Hoy": _ord(hoy),
                   "Mejor fin de fecha": _ord(b), "Peor fin de fecha": _ord(w)})
+    _techo_f = base[equipo]["pts"] + 3
+    if b > 1:
+        L.append(f"**Por qué no puede ser 1º esta fecha:** ganando llega a {_techo_f} puntos, y de los partidos entre "
+                 f"sus rivales salen inevitablemente **{b-1}** equipos por encima de ese número (en cada partido "
+                 f"alguien gana y suma 3, y hasta un equipo con pocos puntos lo pasa).")
     if w <= 8:
         verdicts.append(f"**Playoffs:** ya no podés salir de los 8 esta fecha (peor caso {_ord(w)}).")
     elif b <= 8:
@@ -6801,9 +6806,15 @@ def lpf_chequeo_datos(E, annual=None, prom=None):
                     if e in annual:
                         difs[e] = int(annual[e].get("pj", 0)) - int(d.get("pj", 0))
             vals = sorted(set(difs.values()))
-            if vals and (min(vals) < 0 or len(vals) > 2):
-                faltan.append("actualizar la **Tabla Anual**: no coincide con los partidos jugados en las zonas "
-                              f"(diferencias dispares: {vals[:5]}). Los puestos de copas y descenso salen mal hasta corregirla")
+            # La Anual = Apertura (terminado, igual para todos) + Clausura. Por lo tanto
+            # anual_pj - zona_pj DEBE ser el mismo número para los 30. Cualquier variación
+            # significa que la Anual no incorporó resultados que las zonas sí tienen.
+            if vals and (min(vals) < 0 or len(vals) > 1):
+                _atrasados = sorted([e for e, d in difs.items() if d != max(vals)])
+                faltan.append("**actualizar la Tabla Anual**: no incorporó los últimos resultados que sí están en las "
+                              f"zonas ({len(_atrasados)} equipo(s), p. ej. {', '.join(_atrasados[:3])}). "
+                              "Hasta corregirla, los puestos y las cuentas de **copas y descenso** salen mal. "
+                              "Pegá la tabla actualizada en «Otras formas de cargar»")
             malos_pts = [e for e, d in ((x, y) for b in Z.values() for x, y in b.items())
                          if e in annual and int(annual[e].get("pts", 0)) < int(d.get("pts", 0))]
             if malos_pts:
@@ -7012,6 +7023,10 @@ def render_newsroom(E):
             cutoff = max(1, len(base) - 1)
         st.markdown(exact)
 
+        if _niv != "ok":
+            st.error("🔴 **Este informe está calculado con datos incompletos o desactualizados, así que los números "
+                     "pueden ser incorrectos.** " + "Falta: " + "; ".join(_faltan) +
+                     ". Actualizá los datos antes de usar estas cuentas en una nota.")
         if _con_atraso.get(team):
             st.warning(f"⚠️ **{team} tiene {_con_atraso[team]} partido(s) pendiente(s) de fechas anteriores.** "
                        f"Jugó menos que el resto: su lugar en la tabla se lee con esa salvedad (puede sumar de más) "
