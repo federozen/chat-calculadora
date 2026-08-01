@@ -1,7 +1,8 @@
-streamlit>=1.40
+streamlit>=1.36
 pandas>=2.0
 numpy>=1.26
 requests>=2.31
 matplotlib>=3.8
-lxml>=4.9
- 
+# Para narrativa gráfica del rediseño (descomentá/usá si los necesitás):
+# plotly>=5.22
+# st.graphviz_chart y st.altair_chart NO requieren paquetes extra (vienen con Streamlit)
