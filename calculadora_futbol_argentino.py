@@ -4390,10 +4390,9 @@ def cargar_lpf_todo():
     _pend = lpf_pendientes(_Zc)
     _jug = parse_resultados_lpf(st.session_state.get("LPF_RES_TXT") or None)
     _anual_snap = st.session_state.get("LPF_ANUAL") or {}
-    _ap = lpf_apertura_desde_anual(_anual_snap, _Zc, _jug)
     st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqc, zonas_lpf=_Zc,
-                                   anual_directo={},          # la Anual se DERIVA: Apertura + zonas
-                                   pendientes=_pend, rest=_restc, apertura=_ap,
+                                   anual_directo=_anual_snap,   # se usa TAL CUAL lo cargado
+                                   pendientes=_pend, rest=_restc, apertura={},
                                    camps=(st.session_state.get("lpf_c1", "Belgrano"),
                                           st.session_state.get("lpf_c2", ""),
                                           st.session_state.get("lpf_c3", "")),
@@ -4424,10 +4423,9 @@ def cargar_lpf_espn(liga="arg.1"):
         st.session_state.PROM_TXT = promedios_previas_texto(_pv0)
         st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
     _pend = lpf_pendientes(Zx)
-    _ap_x = lpf_apertura_desde_anual(st.session_state.get("LPF_ANUAL") or {}, Zx, jugados)
     st.session_state.ESTADO = dict(modo="lpf2026", equipos=eqx, zonas_lpf=Zx,
-                                   anual_directo={},          # la Anual se DERIVA
-                                   pendientes=_pend, rest=restx, apertura=_ap_x,
+                                   anual_directo=st.session_state.get("LPF_ANUAL") or {},
+                                   pendientes=_pend, rest=restx, apertura={},
                                    camps=(st.session_state.get("lpf_c1", "Belgrano"),
                                           st.session_state.get("lpf_c2", ""),
                                           st.session_state.get("lpf_c3", "")),
@@ -4573,11 +4571,9 @@ with st.sidebar:
                 _Zc = {"A": canon_base(_bA), "B": canon_base(_bB)}
                 _eqc = [e for b in _Zc.values() for e in b]
                 _restc = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0)) for b in _Zc.values() for e, d in b.items()}
-                _ap_c = lpf_apertura_desde_anual(st.session_state.get("LPF_ANUAL") or {}, _Zc,
-                                                 parse_resultados_lpf(st.session_state.get("LPF_RES_TXT") or None))
                 st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqc, zonas_lpf=_Zc,
-                                               anual_directo={},          # la Anual se DERIVA
-                                               pendientes=lpf_pendientes(_Zc), rest=_restc, apertura=_ap_c,
+                                               anual_directo=st.session_state.get("LPF_ANUAL") or {},
+                                               pendientes=lpf_pendientes(_Zc), rest=_restc, apertura={},
                                                camps=(st.session_state.get("lpf_c1", "Belgrano"), st.session_state.get("lpf_c2", ""),
                                                       st.session_state.get("lpf_c3", "")),
                                                intl=("", ""), n_anual=1, n_prom=1,
@@ -4643,13 +4639,9 @@ with st.sidebar:
                     _gl = _g1 if _g1 is not None else _g2
                     _rest = {e: max(0, LPF_FECHAS_TOTAL - d.get("pj", 0))
                              for _bz in _Z.values() for e, d in _bz.items()}
-                    # Sin Anual pegada: se DERIVA de Apertura + zonas (nunca queda vieja).
-                    _anual_dir = {}
+                    _anual_dir = st.session_state.get("LPF_ANUAL") or {}
                     if (_an or "").strip():
                         _anual_dir = parse_tabla_anual(_an)[0]
-                    elif not _bap:
-                        _bap = lpf_apertura_desde_anual(st.session_state.get("LPF_ANUAL") or {}, _Z,
-                                                        parse_resultados_lpf(st.session_state.get("LPF_RES_TXT") or None))
                     st.session_state.ESTADO = dict(modo="lpf2026", equipos=_eqs, zonas_lpf=_Z,
                                                    anual_directo=_anual_dir,
                                                    pendientes=lpf_pendientes(_Z), rest=_rest, apertura=_bap,
@@ -6873,6 +6865,28 @@ def lpf_chequeo_datos(E, annual=None, prom=None):
                               f"que en su zona, lo cual es imposible ({', '.join(malos_pts[:3])})")
         except Exception:
             pass
+    # Cotas duras: la Anual no puede tener más partidos que Apertura(16) + Clausura(16),
+    # ni un equipo más puntos que 3 × PJ. Un valor imposible es siempre un error de datos.
+    if annual:
+        _imposibles = []
+        _pj_zona = {e: int(d.get("pj", 0)) for b in Z.values() for e, d in b.items()}
+        for e, d in annual.items():
+            _pj = int(d.get("pj", 0)); _pt = int(d.get("pts", 0))
+            # Invariante exacto: Anual = Apertura (16 fechas, ya terminado) + Clausura (su zona)
+            _esperado = LPF_APERTURA_PJ + _pj_zona.get(e, 0)
+            if e in _pj_zona and _pj != _esperado:
+                _imposibles.append(f"{e} ({_pj} PJ en la Anual, deberían ser {_esperado})")
+            elif _pt > 3 * _pj or _pj < 0 or _pt < 0:
+                _imposibles.append(f"{e} ({_pt} pts en {_pj} PJ)")
+        if _imposibles:
+            faltan.append("corregir la **Tabla Anual**: tiene valores imposibles — "
+                          + ", ".join(_imposibles[:3])
+                          + (f" y {len(_imposibles)-3} más" if len(_imposibles) > 3 else "")
+                          + ". Pegá la tabla oficial en «Otras formas de cargar»")
+        _pjs = sorted({int(d.get("pj", 0)) for d in annual.values()})
+        if len(_pjs) > 2:
+            faltan.append(f"revisar la **Tabla Anual**: los equipos tienen cantidades de partidos muy dispares "
+                          f"({_pjs[:5]}), lo que indica que se mezclaron datos de distintas fechas")
     pend = (E or {}).get("pendientes") or []
     det.append(f"Partidos pendientes: {len(pend)}")
     if not pend:
@@ -6946,9 +6960,8 @@ def _rd_apply_results(E, results):
             for base in Z.values() for team, stats in base.items()}
     # No se congela la Anual: si hay Apertura guardado, se recalcula sola desde las zonas
     # ya actualizadas. Congelarla era lo que la dejaba vieja tras cada carga.
-    _keep = {} if (E.get("apertura") or {}) else annual
     updated = dict(E, equipos=[team for base in Z.values() for team in base], zonas_lpf=Z,
-                   anual_directo=_keep, pendientes=pending, rest=rest, jugados=played)
+                   anual_directo=annual, pendientes=pending, rest=rest, jugados=played)
     st.session_state.ESTADO = updated
     st.session_state.LPF_ANUAL = annual
 
