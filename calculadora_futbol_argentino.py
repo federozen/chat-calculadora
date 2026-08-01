@@ -5605,7 +5605,7 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None):
 
     L = [f"**Previa de la {_etq} para {equipo}** — cómo puede terminar la fecha."]
     if _atr:
-        _eqd = sorted({x for lv in _atr for x in lv})
+        _eqd = sorted({x for lv, _f in _atr for x in lv})
         L.append(f"⚠️ **El rango de abajo corresponde sólo a la Fecha {prox}.** En la misma ventana se juegan "
                  f"{len(_atr)} partido(s) postergado(s) de fechas anteriores, que se analizan aparte: "
                  f"{', '.join(_eqd)} pueden sumar hasta 3 puntos adicionales y mover el cuadro. "
