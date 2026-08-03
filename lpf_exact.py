@@ -59,18 +59,31 @@ def safe_guarantee_line(
         # Los candidatos más ajustados primero suelen descartar antes; en los casos
         # fáciles la función sale con el primer subconjunto factible.
         candidates.sort(key=lambda name: (ceilings[name], -pts[name]))
-        edge_set = {frozenset((a, b)) for a, b in relevant_edges}
         for chosen in combinations(candidates, k):
             deficits = [max(0, target_points - pts[name]) for name in chosen]
             if any(deficit > 3 * games_left[name] for name, deficit in zip(chosen, deficits)):
                 continue
-            internal = sum(
-                1 for a, b in combinations(chosen, 2) if frozenset((a, b)) in edge_set
-            )
-            # Cada cruce interno fue contado dos veces en sum(g); se resta una
-            # capacidad de tres puntos para dejar el máximo real del partido.
-            capacity = 3 * sum(games_left[name] for name in chosen) - 3 * internal
-            if sum(deficits) <= capacity:
+            chosen_set = set(chosen)
+            internal_edges = [
+                (a, b) for a, b in relevant_edges if a in chosen_set and b in chosen_set
+            ]
+            degree = {name: 0 for name in chosen}
+            for a, b in internal_edges:
+                degree[a] += 1
+                degree[b] += 1
+            # Primero se asigna a cada club el máximo de sus partidos externos.
+            # Lo que todavía necesita debe salir de los cruces internos, que
+            # reparten como máximo tres puntos por partido entre ambos equipos.
+            residual = []
+            valid = True
+            for name, deficit in zip(chosen, deficits):
+                external_games = max(0, games_left[name] - degree[name])
+                need_internal = max(0, deficit - 3 * external_games)
+                if need_internal > 3 * degree[name]:
+                    valid = False
+                    break
+                residual.append(need_internal)
+            if valid and sum(residual) <= 3 * len(internal_edges):
                 return True
         return False
 
@@ -85,6 +98,105 @@ def safe_guarantee_line(
         else:
             high = middle - 1
     return answer
+
+
+def safe_average_guarantee_points(
+    totals: Mapping[str, int],
+    played: Mapping[str, int],
+    remaining: Mapping[str, int],
+    matches: Iterable[tuple[str, str]],
+    team: str,
+    relegation_slots: int,
+) -> int | None:
+    """Puntos adicionales alcanzables que garantizan escapar de los promedios.
+
+    La comparación se hace por cocientes finales y sin usar ``float``. Un empate
+    de promedio se considera desfavorable: para estar garantizado el equipo debe
+    dejar estrictamente por debajo a, como mínimo, ``relegation_slots`` rivales.
+
+    La relajación prueba todos los subconjuntos de rivales que podrían terminar
+    igual o por encima del promedio objetivo. Descuenta los cruces internos,
+    porque dos clubes que se enfrentan no pueden sumar tres puntos cada uno.
+    Como no fija qué partidos producen los puntos del equipo analizado, conserva
+    como disponibles los puntos de sus rivales directos; por eso puede pedir algún
+    punto de más, pero nunca declarar una salvación que aún dependa de resultados.
+    """
+    if team not in totals:
+        return None
+    names = [name for name in totals if name != team]
+    k = max(0, int(relegation_slots))
+    n = len(names) + 1
+    if k <= 0:
+        return 0
+    if k >= n:
+        return None
+
+    total_points = {name: int(totals.get(name, 0)) for name in totals}
+    games_played = {name: max(0, int(played.get(name, 0))) for name in totals}
+    games_left = {name: max(0, int(remaining.get(name, 0))) for name in totals}
+    final_games = {name: games_played[name] + games_left[name] for name in totals}
+    if final_games.get(team, 0) <= 0:
+        return None
+
+    # Si al menos n-k rivales pueden terminar igual o por encima, el equipo
+    # todavía podría quedar entre los k peores (los empates se toman adversos).
+    rivals_needed = n - k
+    relevant_edges = [
+        (a, b)
+        for a, b in matches
+        if a in totals and b in totals and a != team and b != team
+    ]
+
+    def minimum_add_to_reach(name: str, target_num: int, target_den: int) -> int:
+        den = final_games.get(name, 0)
+        if den <= 0:
+            return 10**9
+        numerator = target_num * den - total_points[name] * target_den
+        return max(0, -(-numerator // target_den))
+
+    def rivals_can_keep_team_in_bottom(target_add: int) -> bool:
+        target_num = total_points[team] + int(target_add)
+        target_den = final_games[team]
+        deficits = {
+            name: minimum_add_to_reach(name, target_num, target_den)
+            for name in names
+        }
+        candidates = [
+            name for name in names
+            if deficits[name] <= 3 * games_left[name]
+        ]
+        if len(candidates) < rivals_needed:
+            return False
+        candidates.sort(key=lambda name: (3 * games_left[name] - deficits[name], total_points[name]))
+
+        for chosen in combinations(candidates, rivals_needed):
+            chosen_set = set(chosen)
+            internal_edges = [
+                (a, b) for a, b in relevant_edges if a in chosen_set and b in chosen_set
+            ]
+            degree = {name: 0 for name in chosen}
+            for a, b in internal_edges:
+                degree[a] += 1
+                degree[b] += 1
+            residual = []
+            valid = True
+            for name in chosen:
+                external_games = max(0, games_left[name] - degree[name])
+                need_internal = max(0, deficits[name] - 3 * external_games)
+                if need_internal > 3 * degree[name]:
+                    valid = False
+                    break
+                residual.append(need_internal)
+            if valid and sum(residual) <= 3 * len(internal_edges):
+                return True
+        return False
+
+    r = games_left[team]
+    reachable = sorted({3 * wins + draws for wins in range(r + 1) for draws in range(r - wins + 1)})
+    for added in reachable:
+        if not rivals_can_keep_team_in_bottom(added):
+            return added
+    return None
 
 
 def next_round_rank_bounds(
