@@ -4869,7 +4869,7 @@ def _procesar_import(jg, pd_, ligas, filtro, solo_fixture=False):
 st.markdown("""
 <div class="main-header">
   <h1>⚽ Calculadora del Fútbol Argentino</h1>
-  <p>Versión 3.5.4 · Base autorreparable, panel por equipo y auditoría por objetivo</p>
+  <p>Versión 3.5.5 · Base autorreparable, panel por equipo y auditoría por objetivo</p>
 </div>
 """, unsafe_allow_html=True)
 
