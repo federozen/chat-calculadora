@@ -4163,10 +4163,20 @@ def lpf_estado_datos(Z, hoy=None):
     if cargadas >= esperadas:
         base_ok = f"✅ Datos al día: tenés cargada la {detalle}."
         if en_juego:
-            return (base_ok + f"\n\n🔴 **La fecha {en_juego} se está jugando en estos días.** "
+            return (base_ok + f"\n\n🟡 **La fecha {en_juego} se está jugando en estos días.** "
                     "Los partidos en curso todavía no están (o están con resultado parcial): "
                     "actualizá las zonas cuando termine la fecha.", False)
         return base_ok, True
+    if mx >= esperadas:
+        jugando = sum(1 for p in pjs if p >= esperadas)
+        faltan_jugar = len(pjs) - jugando
+        return (
+            f"🟡 **La fecha {esperadas} está en curso o tiene partidos postergados.** "
+            f"{jugando} equipos ya tienen {esperadas} PJ y {faltan_jugar} todavía tienen {cargadas}. "
+            "No falta cargar una fecha completa: las tablas representan la foto actual, pero deben "
+            "actualizarse cuando terminen los encuentros restantes.",
+            False,
+        )
     faltan = esperadas - cargadas
     return (f"⚠️ **Datos desactualizados**: tenés la {detalle}, pero según el calendario oficial "
             f"ya se jugaron **{esperadas}**. Te faltan **{faltan}** fecha(s) por cargar — los resultados "
@@ -4859,7 +4869,7 @@ def _procesar_import(jg, pd_, ligas, filtro, solo_fixture=False):
 st.markdown("""
 <div class="main-header">
   <h1>⚽ Calculadora del Fútbol Argentino</h1>
-  <p>Versión 3.1 · Base autorreparable, panel por equipo y auditoría por objetivo</p>
+  <p>Versión 3.5.4 · Base autorreparable, panel por equipo y auditoría por objetivo</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -5242,14 +5252,18 @@ with st.sidebar:
 
     # Estructura de clasificación
     st.subheader("Estructura de clasificación")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.session_state.DIRECTO = st.number_input("Clasifican directos", min_value=1, max_value=10, value=st.session_state.DIRECTO)
-    with col2:
-        st.session_state.MEJORES_TERCEROS = st.number_input("Mejores 3ºs", min_value=0, max_value=20, value=st.session_state.MEJORES_TERCEROS,
-                                                              help="0 = los terceros NO clasifican")
-    st.session_state.CAMPEON = st.text_input("Nombre del 1º", value=st.session_state.CAMPEON,
-                                              help='Ej: "campeón", "1º de zona", "ganador del grupo"')
+    _estado_sidebar = st.session_state.get("ESTADO") or {}
+    if _estado_sidebar.get("modo") == "lpf2026":
+        st.info("LPF 2026: clasifican los 8 primeros de cada zona. La regla está fijada por el torneo.")
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.session_state.DIRECTO = st.number_input("Clasifican directos", min_value=1, max_value=10, value=st.session_state.DIRECTO)
+        with col2:
+            st.session_state.MEJORES_TERCEROS = st.number_input("Mejores 3ºs", min_value=0, max_value=20, value=st.session_state.MEJORES_TERCEROS,
+                                                                  help="0 = los terceros NO clasifican")
+        st.session_state.CAMPEON = st.text_input("Nombre del 1º", value=st.session_state.CAMPEON,
+                                                  help='Ej: "campeón", "1º de zona", "ganador del grupo"')
 
     with st.expander("🎨 Zonas con nombre (para ligas)"):
         st.caption("Pinta la tabla por zonas. Una por línea: «hasta_puesto nombre». Ej.: «3 Libertadores».")
@@ -8151,7 +8165,7 @@ def render_newsroom(E):
     st.subheader("Mesa de redacción")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Datos cargados", f"Fecha {next_date - 1}" if next_date else "Fase terminada")
-    m2.metric("Partidos pendientes", len(pending))
+    m2.metric("Partidos por jugar", len(pending))
     m3.metric("Tabla Anual", f"{len(annual)} equipos")
     m4.metric("Regla", "LPF 2026 oficial")
     _quality = _lpf_refresh_quality(E)

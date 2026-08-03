@@ -203,20 +203,56 @@ def _round_range_sentence(
     bounds: tuple[int, int],
     *,
     cutoff: int,
+    appearances: int = 1,
 ) -> str:
+    """Convierte el rango matemático en una frase editorial útil.
+
+    Los rangos muy abiertos (por ejemplo, 1º–15º al comienzo del torneo) son
+    exactos, pero aportan poco. En esos casos se prioriza contar si el equipo
+    puede entrar, salir o asegurar el top 8. El rango numérico se conserva cuando
+    es estrecho o cuando todo el escenario queda de un solo lado del corte.
+    """
     best, worst = bounds
+    span = worst - best
+    multi = appearances > 1
+    if appearances == 2:
+        multi_label = "dos partidos"
+    else:
+        multi_label = f"{appearances} partidos"
+    subject = f"{team}, que juega {multi_label} en esta ventana," if multi else team
+
     if current_position > cutoff and best > cutoff:
         return (
-            f"{team} no puede entrar al top {cutoff} en esta ventana: "
+            f"{subject} no puede entrar al top {cutoff}: "
             f"su mejor puesto posible por puntos es el {best}º"
         )
+    if current_position <= cutoff and worst <= cutoff:
+        if best == worst:
+            return f"{subject} terminará {best}º por puntos y no puede salir del top {cutoff}"
+        return f"{subject} terminará {_rank_label(best, worst)} y no puede salir del top {cutoff}"
     if current_position > cutoff and best <= cutoff:
-        return f"{team} puede meterse en zona de playoffs y terminar {_rank_label(best, worst)}"
+        if span <= 6:
+            return (
+                f"{subject} puede meterse en el top {cutoff}; su rango posible es "
+                f"{_rank_label(best, worst)}"
+            )
+        return (
+            f"{subject} tiene escenarios para entrar al top {cutoff}, "
+            "pero también puede terminar la ventana afuera"
+        )
     if current_position <= cutoff and worst > cutoff:
-        return f"{team} puede cerrar {_rank_label(best, worst)} y también quedar fuera del top {cutoff}"
+        if span <= 6:
+            return (
+                f"{subject} no tiene asegurado el top {cutoff}; puede terminar "
+                f"{_rank_label(best, worst)}"
+            )
+        return (
+            f"{subject} no tiene asegurado el top {cutoff}: "
+            "puede cerrar la ventana dentro o fuera de los playoffs"
+        )
     if best == worst:
-        return f"{team} cerrará {best}º por puntos"
-    return f"{team} puede cerrar {_rank_label(best, worst)}"
+        return f"{subject} terminará {best}º por puntos"
+    return f"{subject} puede terminar {_rank_label(best, worst)}"
 
 
 def _round_probability_sentence(
@@ -650,6 +686,12 @@ def round_preview_story(
     blocks: list[str] = []
     shown_cup_teams: set[str] = set()
     shown_relegation_teams: set[str] = set()
+    shown_range_teams: set[str] = set()
+    appearances = {
+        team: sum(team in match for match in games)
+        for base in zones.values()
+        for team in base
+    }
     if selected_match is None:
         blocks.append(f"## {round_label} — pantallazo general")
         if data_cutoff_label:
@@ -687,6 +729,10 @@ def round_preview_story(
 
         ranges: list[str] = []
         for team, snapshot in ((local, local_snapshot), (visitor, visitor_snapshot)):
+            # En el pantallazo general, el panorama de toda la ventana se cuenta
+            # una sola vez por equipo. En la vista de un partido se muestra siempre.
+            if selected_match is None and team in shown_range_teams:
+                continue
             base = snapshot["base"]
             zone_games = [match for match in games if match[0] in base or match[1] in base]
             bounds = _window_rank_bounds(team, base, zone_games)
@@ -698,8 +744,11 @@ def round_preview_story(
                         current_position,
                         bounds,
                         cutoff=cutoff,
+                        appearances=appearances.get(team, 1),
                     )
                 )
+                if selected_match is None:
+                    shown_range_teams.add(team)
         if ranges:
             paragraph.append("Al cierre de la ventana, " + "; ".join(ranges) + ".")
 
@@ -765,9 +814,10 @@ def round_preview_story(
         )
     elif selected_match is None:
         blocks.append(
-            "_Los rangos de puesto son exactos por puntos para toda la ventana, también cuando un equipo juega dos veces. "
-            "Si hay igualdad, contemplan un desempate favorable o adverso sin inventar diferencia de gol futura. "
-            "Las probabilidades son una estimación separada y no modifican las cuentas._"
+            "_Las cuentas de puesto son exactas por puntos para toda la ventana, también cuando un equipo juega dos veces. "
+            "Cuando el rango completo es demasiado amplio para aportar una conclusión útil, el relato prioriza si puede "
+            "entrar, salir o asegurar el top 8. Si hay igualdad, contempla un desempate favorable o adverso sin inventar "
+            "diferencia de gol futura. Las probabilidades son una estimación separada y no modifican las cuentas._"
         )
     if (include_cups or include_relegation) and annual:
         blocks.append(
