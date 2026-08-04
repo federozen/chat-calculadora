@@ -10148,8 +10148,20 @@ def render_visualizations_workspace(E):
         if frame is not None and not frame.empty:
             ui_dataframe(frame, use_container_width=True, hide_index=True)
             impact = frame[["Partido", "Diferencia"]].copy()
-            impact["Impacto (pp)"] = impact["Diferencia"].str.replace(" pp", "", regex=False).astype(float)
-            st.bar_chart(impact.set_index("Partido")[["Impacto (pp)"]])
+            # La interfaz muestra decimales con coma (por ejemplo, "0,35 pp").
+            # Convertimos de forma segura al formato numerico que espera pandas.
+            impact["Impacto (pp)"] = pd.to_numeric(
+                impact["Diferencia"]
+                .astype("string")
+                .str.replace(" pp", "", regex=False)
+                .str.replace(",", ".", regex=False),
+                errors="coerce",
+            )
+            impact = impact.dropna(subset=["Impacto (pp)"])
+            if not impact.empty:
+                st.bar_chart(impact.set_index("Partido")[["Impacto (pp)"]])
+            else:
+                ui_caption("No hay valores numericos de impacto disponibles para graficar.")
 
     with tab_radar:
         render_definition_radar(E)
