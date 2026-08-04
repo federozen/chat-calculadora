@@ -1,6 +1,7 @@
 """
 ⚽ Calculadora de escenarios — LPF 2026
 Convertido de Jupyter Notebook (v2) a Streamlit
+Actualización 3.6.1: ESPN → FutbolArgentino.com → última foto válida.
 """
 
 import streamlit as st
@@ -1985,28 +1986,16 @@ ESPN_LIGAS = {
 }
 
 
-LPF_STANDINGS_SOURCES = (
-    {
-        "name": "AFA oficial",
-        "url": (
-            "https://info.afa.org.ar/deposito/html/v3/page.html"
-            "?channel=deportes.futbol.primeraa&lang=es_LA&page=posiciones"
-        ),
-        "referer": "https://www.afa.com.ar/es/pages/estadisticas-primera-division",
-    },
-    {
-        "name": "Liga Profesional / DataFactory",
-        "url": (
-            "https://datafactory-903663207315-sa-east-1-an.s3.sa-east-1.amazonaws.com/"
-            "html/v3/minapp/modules/futbol/page/page.html"
-            "?channel=deportes.futbol.primeraa&lang=es_LA&page=Fase_1"
-        ),
-        "referer": (
-            "https://www.ligaprofesional.ar/"
-            "torneo-clausura-mercado-libre-2026/"
-        ),
-    },
+FUTBOLARGENTINO_ZONES_URL = (
+    "https://www.futbolargentino.com/primera-division/"
+    "clausura/tabla-de-posiciones"
 )
+FUTBOLARGENTINO_ANNUAL_URL = (
+    "https://www.futbolargentino.com/primera-division/"
+    "tabla-general/tabla-de-posiciones"
+)
+FUTBOLARGENTINO_REFERER = "https://www.futbolargentino.com/primera-division/"
+LPF_SNAPSHOT_MAX_AGE_HOURS = 168  # una semana; después obliga a revisar/cargar manualmente
 
 
 def _source_headers(referer=""):
@@ -2026,8 +2015,8 @@ def _source_headers(referer=""):
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def _official_html_get(url, referer="", timeout=30, retries=1):
-    """Descarga un módulo oficial y conserva el HTML durante diez minutos."""
+def _standings_html_get(url, referer="", timeout=30, retries=1):
+    """Descarga una página de posiciones y conserva el HTML diez minutos."""
     import time
     import requests as _rq
 
@@ -2042,7 +2031,7 @@ def _official_html_get(url, referer="", timeout=30, retries=1):
             )
             if response.status_code == 200:
                 text = response.text or ""
-                if len(text.strip()) < 100:
+                if len(text.strip()) < 500:
                     raise RuntimeError(
                         f"respondió HTTP 200, pero entregó sólo {len(text)} caracteres"
                     )
@@ -2054,7 +2043,7 @@ def _official_html_get(url, referer="", timeout=30, retries=1):
             last_error = exc
             if attempt < int(retries):
                 time.sleep(1.25 * (attempt + 1))
-    raise RuntimeError(str(last_error or "no se pudo descargar el módulo"))
+    raise RuntimeError(str(last_error or "no se pudo descargar la página"))
 
 
 def _norm_table_label(value):
@@ -2103,15 +2092,44 @@ def _find_table_column(columns, aliases):
         if norm in aliases:
             return col
     for col, norm in normalized.items():
-        if any(alias and (norm.startswith(alias + " ") or norm.endswith(" " + alias)) for alias in aliases):
+        if any(
+            alias and (
+                norm.startswith(alias + " ")
+                or norm.endswith(" " + alias)
+                or (" " + alias + " ") in (" " + norm + " ")
+            )
+            for alias in aliases
+        ):
             return col
     return None
 
 
-def _parse_official_standings_table(df):
+_FUTBOLARGENTINO_ALIASES = {
+    "a tucuman": "Atlético Tucumán",
+    "argentinos j": "Argentinos Juniors",
+    "c cordoba": "Central Córdoba",
+    "defensa": "Defensa y Justicia",
+    "estudiantes ba": "Estudiantes de Río Cuarto",
+    "estudiantes rc": "Estudiantes de Río Cuarto",
+    "ind rivadavia": "Independiente Rivadavia",
+    "rosario": "Rosario Central",
+}
+
+
+def _source_team_name(raw_team, source_name=""):
+    clean = re.sub(r"^\s*\d+[.)-]?\s*", "", str(raw_team or ""))
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if source_name == "FutbolArgentino.com":
+        alias = _FUTBOLARGENTINO_ALIASES.get(_norm_table_label(clean))
+        if alias:
+            return alias
+    return canon_club(clean)
+
+
+def _parse_standings_table(df, source_name=""):
     """Convierte una tabla HTML de posiciones a la estructura interna."""
     if df is None or getattr(df, "empty", True):
-        return {}, {}
+        return {}
     table = _flatten_table_columns(df)
     columns = list(table.columns)
 
@@ -2139,38 +2157,36 @@ def _parse_official_standings_table(df):
         columns,
         {"gc", "ga", "g c", "contra", "goles en contra"},
     )
-    zone_col = _find_table_column(
-        columns,
-        {"zona", "grupo", "fase", "group"},
-    )
 
     if team_col is None:
         best = None
         best_score = -1
         for col in columns:
             values = [str(v).strip() for v in table[col].tolist()]
-            text_values = [v for v in values if re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", v)]
+            text_values = [
+                v for v in values
+                if re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", v)
+            ]
             score = len(set(text_values))
             if score > best_score:
                 best, best_score = col, score
         team_col = best
 
     if not team_col or not pts_col or not pj_col:
-        return {}, {}
+        return {}
 
     base = {}
-    zones = {}
     for _, row in table.iterrows():
         raw_team = str(row.get(team_col, "") or "").strip()
-        raw_team = re.sub(r"^\s*\d+[.)-]?\s*", "", raw_team)
-        raw_team = re.sub(r"\s+", " ", raw_team).strip()
-        if not raw_team or _norm_table_label(raw_team) in {"equipo", "club", "team", "nan"}:
+        if not raw_team or _norm_table_label(raw_team) in {
+            "equipo", "club", "team", "nan", "total"
+        }:
             continue
         pts = _table_int(row.get(pts_col))
         pj = _table_int(row.get(pj_col))
         if pts is None or pj is None:
             continue
-        team = canon_club(raw_team)
+        team = _source_team_name(raw_team, source_name=source_name)
         if not team:
             continue
         gf = _table_int(row.get(gf_col), 0) if gf_col else 0
@@ -2185,12 +2201,31 @@ def _parse_official_standings_table(df):
             "gf": int(gf or 0),
             "ga": int(ga or 0),
         }
-        if zone_col:
-            zone_text = str(row.get(zone_col, "") or "").upper()
-            match = re.search(r"\b([AB])\b", zone_text)
-            if match:
-                zones[team] = match.group(1)
-    return base, zones
+    return canon_base(base)
+
+
+def _html_standings_tables(html, source_name=""):
+    """Lee todas las tablas de posiciones útiles de una página HTML."""
+    from io import StringIO
+
+    try:
+        tables = pd.read_html(StringIO(html))
+    except Exception as exc:
+        raise RuntimeError(f"no pude leer tablas HTML ({exc})") from exc
+
+    parsed = []
+    for table in tables:
+        try:
+            base = _parse_standings_table(table, source_name=source_name)
+        except Exception:
+            base = {}
+        if len(base) >= 10:
+            parsed.append(base)
+    if not parsed:
+        raise RuntimeError(
+            "la página respondió, pero no encontré una tabla de posiciones legible"
+        )
+    return parsed
 
 
 def _known_lpf_zone_rosters():
@@ -2227,85 +2262,329 @@ def _assign_two_zone_tables(candidates):
     return {"A": canon_base(best[1]), "B": canon_base(best[2])}
 
 
-def _official_zones_from_html(html):
-    """Extrae las zonas de tablas HTML estáticas o embebidas por el proveedor."""
-    from io import StringIO
-
-    try:
-        tables = pd.read_html(StringIO(html))
-    except Exception as exc:
-        raise RuntimeError(f"no pude leer tablas HTML ({exc})") from exc
-
-    parsed = []
-    for table in tables:
-        base, row_zones = _parse_official_standings_table(table)
-        if len(base) >= 10:
-            parsed.append((base, row_zones))
-
-    if not parsed:
+def _validate_base_rows(base, *, expected_size, label, max_pj):
+    if len(base or {}) != int(expected_size):
         raise RuntimeError(
-            "el módulo respondió, pero las filas se cargan con JavaScript y no "
-            "aparecieron como tabla HTML"
+            f"{label}: esperaba {expected_size} equipos y encontré {len(base or {})}"
         )
+    for team, stats in (base or {}).items():
+        pts = int(stats.get("pts", -1))
+        pj = int(stats.get("pj", -1))
+        gf = int(stats.get("gf", 0))
+        ga = int(stats.get("ga", 0))
+        dg = int(stats.get("dg", gf - ga))
+        if pj < 0 or pj > int(max_pj):
+            raise RuntimeError(f"{label}: PJ inválidos para {team}: {pj}")
+        if pts < 0 or pts > 3 * pj:
+            raise RuntimeError(f"{label}: puntos incompatibles para {team}: {pts} en {pj} PJ")
+        if gf < 0 or ga < 0:
+            raise RuntimeError(f"{label}: goles negativos para {team}")
+        if dg != gf - ga:
+            # Algunos proveedores publican la DG como texto independiente. Se corrige,
+            # pero no se rechaza toda la tabla por esa diferencia.
+            stats["dg"] = gf - ga
 
-    for base, row_zones in parsed:
-        if row_zones:
-            zones = {
-                "A": {team: stats for team, stats in base.items() if row_zones.get(team) == "A"},
-                "B": {team: stats for team, stats in base.items() if row_zones.get(team) == "B"},
-            }
-            if len(zones["A"]) == 15 and len(zones["B"]) == 15:
-                return {label: canon_base(value) for label, value in zones.items()}
 
-    separate = [base for base, _ in parsed if 13 <= len(base) <= 17]
-    zones = _assign_two_zone_tables(separate)
-    if len(zones.get("A", {})) == 15 and len(zones.get("B", {})) == 15:
-        return zones
+def _validate_lpf_tables(zones, annual=None):
+    if set((zones or {}).keys()) != {"A", "B"}:
+        raise RuntimeError("no pude identificar las zonas A y B")
+    _validate_base_rows(zones["A"], expected_size=15, label="Zona A", max_pj=16)
+    _validate_base_rows(zones["B"], expected_size=15, label="Zona B", max_pj=16)
 
-    combined = max((base for base, _ in parsed), key=len)
-    if len(combined) >= 28:
-        known = _known_lpf_zone_rosters()
-        zones = {
-            label: {team: stats for team, stats in combined.items() if team in roster}
-            for label, roster in known.items()
-        }
-        if len(zones["A"]) == 15 and len(zones["B"]) == 15:
-            return {label: canon_base(value) for label, value in zones.items()}
+    known = _known_lpf_zone_rosters()
+    expected = known["A"] | known["B"]
+    actual_a, actual_b = set(zones["A"]), set(zones["B"])
+    actual = actual_a | actual_b
+    if actual_a & actual_b:
+        raise RuntimeError("hay equipos repetidos entre las zonas")
+    if expected and actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        detail = []
+        if missing:
+            detail.append("faltan " + ", ".join(missing))
+        if extra:
+            detail.append("sobran " + ", ".join(extra))
+        raise RuntimeError("los clubes no coinciden con el Clausura 2026: " + "; ".join(detail))
 
-    sizes = ", ".join(str(len(base)) for base, _ in parsed)
-    raise RuntimeError(
-        "encontré tablas, pero no pude validar dos zonas de 15 equipos "
-        f"(tamaños detectados: {sizes})"
+    if annual is not None:
+        _validate_base_rows(annual, expected_size=30, label="Tabla anual", max_pj=32)
+        if set(annual) != actual:
+            missing = sorted(actual - set(annual))
+            extra = sorted(set(annual) - actual)
+            detail = []
+            if missing:
+                detail.append("faltan " + ", ".join(missing))
+            if extra:
+                detail.append("sobran " + ", ".join(extra))
+            raise RuntimeError("la Tabla Anual no coincide con las zonas: " + "; ".join(detail))
+        for team in actual:
+            zone_stats = zones["A"].get(team) or zones["B"].get(team) or {}
+            annual_stats = annual.get(team) or {}
+            if int(annual_stats.get("pj", 0)) < int(zone_stats.get("pj", 0)):
+                raise RuntimeError(f"la Anual tiene menos PJ que el Clausura para {team}")
+            if int(annual_stats.get("pts", 0)) < int(zone_stats.get("pts", 0)):
+                raise RuntimeError(f"la Anual tiene menos puntos que el Clausura para {team}")
+    return True
+
+
+def futbolargentino_zones(timeout=30):
+    """Carga y valida las dos zonas desde FutbolArgentino.com."""
+    html, final_url = _standings_html_get(
+        FUTBOLARGENTINO_ZONES_URL,
+        FUTBOLARGENTINO_REFERER,
+        timeout=timeout,
     )
-
-
-def official_lpf_zones(source, timeout=30):
-    """Carga y valida las zonas desde una de las páginas oficiales."""
-    html, final_url = _official_html_get(
-        source["url"], source.get("referer", ""), timeout=timeout
-    )
-    zones = _official_zones_from_html(html)
+    parsed = [base for base in _html_standings_tables(html, "FutbolArgentino.com") if 13 <= len(base) <= 17]
+    zones = _assign_two_zone_tables(parsed)
+    _validate_lpf_tables(zones)
     return zones, final_url
 
 
-def lpf_zones_with_fallback(liga="arg.1", timeout=30):
-    """ESPN → AFA → LPF/DataFactory, con diagnóstico de cada intento."""
+def futbolargentino_annual(timeout=30):
+    """Carga la Tabla Anual desde FutbolArgentino.com."""
+    html, final_url = _standings_html_get(
+        FUTBOLARGENTINO_ANNUAL_URL,
+        FUTBOLARGENTINO_REFERER,
+        timeout=timeout,
+    )
+    parsed = _html_standings_tables(html, "FutbolArgentino.com")
+    candidates = [base for base in parsed if len(base) >= 28]
+    if not candidates:
+        sizes = ", ".join(str(len(base)) for base in parsed)
+        raise RuntimeError(
+            "no encontré una Tabla Anual de 30 equipos "
+            f"(tamaños detectados: {sizes or 'ninguno'})"
+        )
+    annual = max(candidates, key=len)
+    _validate_base_rows(annual, expected_size=30, label="Tabla anual", max_pj=32)
+    return canon_base(annual), final_url
+
+
+def _snapshot_path():
+    import os
+    from pathlib import Path
+
+    override = str(os.environ.get("LPF_SNAPSHOT_PATH", "") or "").strip()
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent / "data" / "lpf_last_valid.json"
+
+
+def _plain_base(base):
+    return {
+        str(team): {
+            key: int((stats or {}).get(key, 0))
+            for key in ("pts", "pj", "dg", "gf", "ga")
+        }
+        for team, stats in (base or {}).items()
+    }
+
+
+def _save_lpf_snapshot(zones, annual, source_name):
+    """Guarda la última foto válida en sesión y, si se puede, en disco."""
+    import json
+    from datetime import datetime, timezone
+
+    _validate_lpf_tables(zones, annual)
+    payload = {
+        "schema": 1,
+        "competition": "LPF Clausura 2026",
+        "source": str(source_name or "fuente automática"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "zones": {label: _plain_base(base) for label, base in zones.items()},
+        "annual": _plain_base(annual),
+    }
+    st.session_state["LPF_LAST_VALID_SNAPSHOT"] = payload
+    try:
+        path = _snapshot_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:
+        # En algunos hostings el filesystem es efímero o de sólo lectura. La sesión
+        # sigue conservando la foto y se informa el detalle sin bloquear la carga.
+        return f"No pude guardar el respaldo en disco: {exc}"
+    return ""
+
+
+def _snapshot_payloads():
+    import json
+
+    candidates = []
+    session_payload = st.session_state.get("LPF_LAST_VALID_SNAPSHOT")
+    if isinstance(session_payload, dict):
+        candidates.append(("sesión", session_payload))
+    try:
+        path = _snapshot_path()
+        if path.exists():
+            candidates.append(("disco", json.loads(path.read_text(encoding="utf-8"))))
+    except Exception:
+        pass
+    return candidates
+
+
+def _load_lpf_snapshot(max_age_hours=LPF_SNAPSHOT_MAX_AGE_HOURS):
+    """Recupera la última foto válida si no supera la antigüedad admitida."""
+    from datetime import datetime, timezone
+
     errors = []
-    zones, espn_error = espn_lpf_zonas(liga, timeout=timeout)
-    if not espn_error:
-        return zones, "ESPN", errors, None
-    errors.append(espn_error)
-
-    for source in LPF_STANDINGS_SOURCES:
+    for location, payload in _snapshot_payloads():
         try:
-            zones, _final_url = official_lpf_zones(source, timeout=timeout)
-            return zones, source["name"], errors, None
+            updated = datetime.fromisoformat(str(payload.get("updated_at", "")).replace("Z", "+00:00"))
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            age_hours = max(0.0, (datetime.now(timezone.utc) - updated).total_seconds() / 3600.0)
+            if age_hours > float(max_age_hours):
+                errors.append(
+                    f"respaldo de {location} demasiado viejo ({age_hours / 24:.1f} días)"
+                )
+                continue
+            zones = {
+                label: canon_base(base)
+                for label, base in (payload.get("zones") or {}).items()
+            }
+            annual = canon_base(payload.get("annual") or {})
+            _validate_lpf_tables(zones, annual)
+            source = str(payload.get("source") or "fuente desconocida")
+            return zones, annual, source, age_hours, None
         except Exception as exc:
-            errors.append(f"{source['name']}: {exc}")
+            errors.append(f"respaldo de {location} inválido: {exc}")
+    return {}, {}, "", None, " | ".join(errors) if errors else "no existe un respaldo válido"
 
-    return {}, "", errors, (
+
+def _session_or_embedded_annual(zones):
+    """Último recurso para la Anual si la fuente externa falla pero las zonas son frescas."""
+    candidates = [
+        ("Tabla Anual de la sesión", st.session_state.get("LPF_ANUAL") or {}),
+    ]
+    try:
+        embedded = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
+    except Exception:
+        embedded = {}
+    candidates.append(("Tabla Anual incluida en la aplicación", embedded))
+    for label, annual in candidates:
+        annual = canon_base(annual)
+        try:
+            _validate_lpf_tables(zones, annual)
+            return annual, label
+        except Exception:
+            continue
+    return {}, ""
+
+
+def lpf_tables_with_fallback(liga="arg.1", timeout=30):
+    """ESPN → FutbolArgentino.com → última foto válida → carga manual.
+
+    ESPN se usa para las zonas cuando responde. FutbolArgentino.com aporta las
+    zonas de respaldo y la Tabla Anual. Una foto sólo se guarda si las dos zonas y
+    la Anual pasan las validaciones de cantidad de clubes, nombres y consistencia.
+    """
+    warnings = []
+    errors = []
+
+    espn_zones, espn_error = espn_lpf_zonas(liga, timeout=timeout)
+    if espn_error:
+        errors.append(espn_error)
+        espn_zones = {}
+    else:
+        try:
+            _validate_lpf_tables(espn_zones)
+        except Exception as exc:
+            errors.append(f"ESPN devolvió una tabla inválida: {exc}")
+            espn_zones = {}
+
+    fa_zones, fa_annual = {}, {}
+    fa_zone_error = fa_annual_error = None
+    try:
+        fa_zones, _ = futbolargentino_zones(timeout=timeout)
+    except Exception as exc:
+        fa_zone_error = str(exc)
+        errors.append(f"FutbolArgentino.com (zonas): {exc}")
+    try:
+        fa_annual, _ = futbolargentino_annual(timeout=timeout)
+    except Exception as exc:
+        fa_annual_error = str(exc)
+        errors.append(f"FutbolArgentino.com (Anual): {exc}")
+
+    zones = espn_zones or fa_zones
+    zones_source = "ESPN" if espn_zones else ("FutbolArgentino.com" if fa_zones else "")
+
+    if zones:
+        annual = fa_annual
+        annual_source = "FutbolArgentino.com"
+        if not annual:
+            # Antes de usar una tabla incluida, se intenta reutilizar sólo la parte
+            # anual de una foto reciente y validada.
+            snap_zones, snap_annual, snap_source, age_hours, _snap_err = _load_lpf_snapshot()
+            if snap_annual:
+                try:
+                    _validate_lpf_tables(zones, snap_annual)
+                    annual = snap_annual
+                    annual_source = f"último respaldo ({snap_source})"
+                    warnings.append(
+                        "La Tabla Anual no pudo actualizarse; uso la última válida "
+                        f"de hace {age_hours:.1f} horas."
+                    )
+                except Exception:
+                    annual = {}
+            if not annual:
+                annual, annual_source = _session_or_embedded_annual(zones)
+                if annual:
+                    warnings.append(
+                        f"La Tabla Anual no pudo actualizarse; uso {annual_source.lower()}."
+                    )
+
+        if annual:
+            _validate_lpf_tables(zones, annual)
+            source_name = zones_source
+            if annual_source and annual_source != zones_source:
+                source_name = f"{zones_source} (zonas) + {annual_source} (Anual)"
+            # No se pisa el respaldo con una Anual incluida/posiblemente vieja.
+            if fa_annual:
+                disk_warning = _save_lpf_snapshot(zones, annual, source_name)
+                if disk_warning:
+                    warnings.append(disk_warning)
+            if zones_source == "FutbolArgentino.com" and espn_error:
+                warnings.append("ESPN rechazó las posiciones; se usó el respaldo automático.")
+            return zones, annual, source_name, warnings, None
+
+        warnings.append(
+            "Las zonas se actualizaron, pero no hay una Tabla Anual válida; "
+            "las cuentas de copas pueden quedar bloqueadas."
+        )
+        return zones, {}, zones_source, warnings, None
+
+    snap_zones, snap_annual, snap_source, age_hours, snap_error = _load_lpf_snapshot()
+    if snap_zones:
+        warnings.append(
+            "No pude consultar las fuentes ahora. Uso la última foto válida "
+            f"({snap_source}), guardada hace {age_hours:.1f} horas."
+        )
+        return (
+            snap_zones,
+            snap_annual,
+            f"Último respaldo válido · {snap_source}",
+            warnings,
+            None,
+        )
+
+    if snap_error:
+        errors.append(f"Último respaldo: {snap_error}")
+    return {}, {}, "", warnings, (
         "No pude obtener las zonas automáticamente. " + " | ".join(errors)
     )
+
+
+def lpf_zones_with_fallback(liga="arg.1", timeout=30):
+    """Compatibilidad con llamadas anteriores: devuelve sólo las zonas."""
+    zones, _annual, source_name, warnings, error = lpf_tables_with_fallback(
+        liga=liga,
+        timeout=timeout,
+    )
+    return zones, source_name, warnings, error
+
 
 @st.cache_data(ttl=600, show_spinner=False)
 def _espn_get(url, timeout=30, retries=2):
@@ -5753,13 +6032,18 @@ def cargar_lpf_todo():
 
 
 def cargar_lpf_espn(liga="arg.1"):
-    """Actualiza zonas con respaldo oficial y usa ESPN para los resultados."""
+    """Actualiza tablas con respaldos y usa ESPN para resultados/fixture."""
     if _lpf_opening_is_valid(globals().get("LPF_APERTURA_BASE_2026") or {}):
         st.session_state.LPF_APERTURA = canon_base(LPF_APERTURA_BASE_2026)
 
-    zones, source_name, source_warnings, err = lpf_zones_with_fallback(liga)
+    zones, annual, source_name, source_warnings, err = lpf_tables_with_fallback(liga)
     if err:
         return None, err
+
+    if annual:
+        st.session_state.LPF_ANUAL = canon_base(annual)
+    elif not st.session_state.get("LPF_ANUAL"):
+        st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
 
     jug_raw, _pen_raw, nota, ferr = espn_fixture(liga, 120)
     eqset = {team for base in zones.values() for team in base}
@@ -5769,8 +6053,6 @@ def cargar_lpf_espn(liga="arg.1"):
         if cl in eqset and cv in eqset:
             played.append((cl, cv, int(gl), int(gv)))
 
-    if not st.session_state.get("LPF_ANUAL"):
-        st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
     if not st.session_state.get("PROMEDIOS"):
         prev, _pja0, _pav0 = parse_promedios_tabla(
             PROMEDIOS_LPF_2026,
@@ -5790,6 +6072,7 @@ def cargar_lpf_espn(liga="arg.1"):
     return {
         "A": len(zones.get("A", {})),
         "B": len(zones.get("B", {})),
+        "anual": len(st.session_state.get("LPF_ANUAL") or {}),
         "jug": len(played),
         "pend": len(state["pendientes"]),
         "nota": nota or "",
@@ -5885,7 +6168,7 @@ with st.sidebar:
     st.caption("Incluye Zonas A y B, Tabla Anual y Promedios (datos internos, **previo a la fecha 2 del Clausura 2026**) "
                "y el **fixture completo de las 16 fechas** para los cruces mano a mano.")
     if st.button("\U0001F504 Actualizar a hoy (automático)", use_container_width=True, key="btn_espn_refresh_side"):
-        with st.spinner("Consultando ESPN, AFA y Liga Profesional\u2026"):
+        with st.spinner("Consultando ESPN y FutbolArgentino.com\u2026"):
             _r, _e = cargar_lpf_espn("arg.1")
         if _e:
             st.warning(_e + "  \u2014 mientras tanto podés pegar las tablas en «Otras formas de cargar».")
@@ -5905,7 +6188,7 @@ with st.sidebar:
                 st.warning("Las tablas se actualizaron, pero no pude actualizar resultados: " + _r["fixture_err"])
 
             st.rerun()
-    st.caption("Intenta ESPN y, si las posiciones son rechazadas, usa AFA o Liga Profesional. También trae los **resultados** (forma y rachas) en un clic. "
+    st.caption("Intenta ESPN y, si las posiciones son rechazadas, usa FutbolArgentino.com. Si tampoco responde, recupera la última foto válida. También trae los **resultados** (forma y rachas) en un clic. "
                "_La Tabla Anual se recalcula automáticamente desde el Apertura fijo; revisá el semáforo después de actualizar._")
     with st.expander("\U0001F6E0\ufe0f Otras formas de cargar o editar a mano (avanzado)", expanded=False):
         modo_carga = st.radio("Fuente", ["🇦🇷 LPF 2026 (Clausura: zonas A y B)", "Otra liga / copa (avanzado)"], label_visibility="collapsed")
@@ -5914,7 +6197,7 @@ with st.sidebar:
             st.caption("Reglamento LPF 2026: dos zonas de 15, una rueda, 16 fechas. Clasifican los **8 primeros de cada zona** "
                        "a Octavos. La **Tabla General** (para copas y descenso) suma Apertura + Clausura.")
             if st.button("⚡ Traer el Clausura automáticamente", use_container_width=True):
-                with st.spinner("Consultando ESPN, AFA y Liga Profesional…"):
+                with st.spinner("Consultando ESPN y FutbolArgentino.com…"):
                     _r, _e = cargar_lpf_espn("arg.1")
                 if _e:
                     st.warning(_e)
@@ -6297,7 +6580,7 @@ if not st.session_state.ESTADO:
         st.rerun()
     with st.expander("\u2026o traerlo de fuentes autom\u00e1ticas"):
         if st.button("\u26a1 Traer el Clausura autom\u00e1ticamente", use_container_width=True, key="btn_espn_main"):
-            with st.spinner("Consultando ESPN, AFA y Liga Profesional\u2026"):
+            with st.spinner("Consultando ESPN y FutbolArgentino.com\u2026"):
                 _r, _e = cargar_lpf_espn("arg.1")
             if _e:
                 st.error(_e)
@@ -7713,7 +7996,7 @@ AYUDA_LPF = """### ⚽ Calculadora LPF 2026 — guía de uso
 
 **Cómo cargar y actualizar los datos**
 1. Botón grande **«📥 Cargar TODO»** — trae de una las dos zonas, la Tabla Anual, los promedios, el fixture de las 16 fechas y los resultados de la fecha 1 (datos internos, sirve sin internet).
-2. **«🔄 Actualizar a hoy (automático)»** — una vez por fecha: intenta ESPN y, si la tabla es rechazada, prueba AFA y Liga Profesional. Los resultados partido a partido siguen llegando desde ESPN; si todas las fuentes fallan, queda el pegado manual.
+2. **«🔄 Actualizar a hoy (automático)»** — una vez por fecha: intenta ESPN y, si la tabla es rechazada, prueba FutbolArgentino.com; si ambas fuentes fallan, usa la última foto válida. Los resultados partido a partido siguen llegando desde ESPN; si todas las fuentes fallan, queda el pegado manual.
 3. En **«🛠️ Otras formas de cargar»**: pegar las tablas de Promiedos, editar el histórico, y **«🥅 Resultados partido a partido»** para pegar/actualizar marcadores a mano.
 4. La app te avisa sola si los datos quedaron viejos o si hay una fecha en curso.
 
