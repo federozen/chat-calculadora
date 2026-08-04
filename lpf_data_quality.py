@@ -6,7 +6,6 @@ foto fija del Apertura más la tabla actual del Clausura siempre que sea posible
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import replace
 import re
 import unicodedata
 from typing import Iterable, Mapping, Sequence
@@ -92,20 +91,32 @@ def fixture_records(
     played: Iterable[tuple[str, str, int, int]] | None,
     zones: Mapping[str, Mapping[str, Mapping[str, object]]] | None = None,
 ) -> tuple[list[MatchRecord], list[AuditIssue]]:
-    """Reconcilia fixture y resultados explícitos.
+    """Reconcilia fixture y resultados explícitos sin inventar qué partido se jugó.
 
-    Los resultados son autoritativos. Si faltan resultados partido a partido, usa
-    los PJ sólo para inferir la menor cantidad necesaria de partidos jugados y deja
-    esos registros marcados como ``inferred``. Esto evita asumir que las primeras N
-    fechas fueron jugadas cuando existe un postergado conocido.
+    Los marcadores partido a partido son la fuente autoritativa. Los PJ de las
+    tablas se usan únicamente como control. Si faltan resultados para explicar
+    esos PJ, los encuentros tempranos compatibles quedan con estado
+    ``unconfirmed`` y el dominio de datos se bloquea hasta completar la fuente.
+
+    Este comportamiento evita el error anterior: cuando un club tenía un
+    postergado, una inferencia codiciosa podía marcar como jugados los primeros
+    partidos del fixture y dejar como pendiente uno posterior que sí se había
+    disputado.
     """
     issues: list[AuditIssue] = []
     played_map: dict[tuple[str, str], tuple[int, int]] = {}
     for home, away, gh, ga in played or []:
         key = (home, away)
-        if key in played_map and played_map[key] != (int(gh), int(ga)):
-            issues.append(AuditIssue("duplicate_result", f"Hay dos resultados distintos para {home}–{away}.", "blocked", "data", (home, away)))
-        played_map[key] = (int(gh), int(ga))
+        result = (int(gh), int(ga))
+        if key in played_map and played_map[key] != result:
+            issues.append(AuditIssue(
+                "duplicate_result",
+                f"Hay dos resultados distintos para {home}–{away}.",
+                "blocked",
+                "data",
+                (home, away),
+            ))
+        played_map[key] = result
 
     rows: list[MatchRecord] = []
     by_key: dict[tuple[str, str], int] = {}
@@ -130,12 +141,14 @@ def fixture_records(
         by_key[key] = idx
         rows.append(rec)
 
-    unknown = [key for key in played_map if key not in by_key]
-    if unknown:
+    unknown_results = [key for key in played_map if key not in by_key]
+    if unknown_results:
         issues.append(AuditIssue(
             "results_not_in_fixture",
-            "Hay resultados que no aparecen en el fixture: " + ", ".join(f"{a}–{b}" for a, b in unknown[:4]),
-            "blocked", "data"
+            "Hay resultados que no aparecen en el fixture: "
+            + ", ".join(f"{a}–{b}" for a, b in unknown_results[:4]),
+            "blocked",
+            "data",
         ))
 
     if not zones:
@@ -143,47 +156,91 @@ def fixture_records(
 
     table = flatten_zones(zones)
     explicit_counts = Counter()
+    explicit_rounds: list[int] = []
     for rec in rows:
         if rec.status == "played":
             explicit_counts[rec.home] += 1
             explicit_counts[rec.away] += 1
-    missing = {team: max(0, row["pj"] - explicit_counts[team]) for team, row in table.items()}
-    impossible = [team for team, row in table.items() if explicit_counts[team] > row["pj"]]
+            explicit_rounds.append(rec.round_number)
+
+    impossible = [
+        team for team, row in table.items()
+        if explicit_counts[team] > row["pj"]
+    ]
     if impossible:
         issues.append(AuditIssue(
-            "too_many_results", "Hay más resultados explícitos que PJ en la tabla para: " + ", ".join(impossible),
-            "blocked", "data", tuple(impossible)
+            "too_many_results",
+            "Hay más resultados explícitos que PJ en la tabla para: " + ", ".join(impossible),
+            "blocked",
+            "data",
+            tuple(impossible),
         ))
 
-    # Inferencia conservadora: un partido sólo se marca jugado si ambos equipos
-    # todavía necesitan exactamente un partido en sus contadores.
-    for idx, rec in sorted(enumerate(rows), key=lambda item: (item[1].round_number, item[0])):
-        if rec.status == "played":
-            continue
-        if missing.get(rec.home, 0) > 0 and missing.get(rec.away, 0) > 0:
-            rows[idx] = replace(rec, status="played_inferred", inferred=True, source="pj_inference")
-            missing[rec.home] -= 1
-            missing[rec.away] -= 1
+    missing = {
+        team: max(0, row["pj"] - explicit_counts[team])
+        for team, row in table.items()
+    }
+    unresolved_teams = [team for team, count in missing.items() if count]
 
-    unresolved = [team for team, count in missing.items() if count]
-    if unresolved:
+    if unresolved_teams:
+        # El máximo número de PJ no identifica una fecha de manera perfecta cuando
+        # hay postergados. Se complementa con la última fecha que sí tiene al menos
+        # un resultado explícito. Sólo los cruces tempranos cuyos dos protagonistas
+        # necesitan resultados adicionales se marcan como "sin confirmar".
+        round_hint = max(
+            max((row["pj"] for row in table.values()), default=0),
+            max(explicit_rounds, default=0),
+        )
+        uncertain_count = 0
+        for idx, rec in enumerate(rows):
+            if rec.status != "scheduled" or rec.round_number > round_hint:
+                continue
+            if missing.get(rec.home, 0) <= 0 or missing.get(rec.away, 0) <= 0:
+                continue
+            rows[idx] = MatchRecord(
+                match_id=rec.match_id,
+                round_number=rec.round_number,
+                original_round=rec.original_round,
+                home=rec.home,
+                away=rec.away,
+                kind=rec.kind,
+                zone=rec.zone,
+                status="unconfirmed",
+                home_goals=None,
+                away_goals=None,
+                inferred=False,
+                source="pj_unconfirmed",
+            )
+            uncertain_count += 1
+
+        missing_detail = ", ".join(
+            f"{team} ({missing[team]})" for team in unresolved_teams[:10]
+        )
+        message = (
+            "Faltan resultados partido a partido para explicar los PJ de: "
+            f"{missing_detail}. No se asignó ningún partido como jugado por descarte."
+        )
+        if uncertain_count:
+            message += f" Hay {uncertain_count} cruce(s) con estado sin confirmar."
         issues.append(AuditIssue(
-            "fixture_unresolved",
-            "Los PJ no alcanzan para identificar con certeza todos los partidos jugados de: " + ", ".join(unresolved[:8]),
-            "warning", "data", tuple(unresolved),
-            "Cargar resultados partido a partido o marcar los postergados manualmente."
+            "fixture_unconfirmed",
+            message,
+            "blocked",
+            "data",
+            tuple(unresolved_teams),
+            "Actualizar los resultados desde el inicio del Clausura o cargar los marcadores faltantes.",
         ))
-    inferred_count = sum(rec.inferred for rec in rows)
-    if inferred_count:
-        issues.append(AuditIssue(
-            "fixture_inferred", f"{inferred_count} partidos fueron inferidos por PJ porque no tenían marcador cargado.",
-            "warning", "data", suggestion="La carga partido a partido elimina esta incertidumbre."
-        ))
+
     return rows, issues
 
 
 def pending_pairs(records: Sequence[MatchRecord]) -> list[tuple[str, str]]:
+    """Devuelve sólo pendientes confirmados; excluye estados sin confirmar."""
     return [(r.home, r.away) for r in records if r.status == "scheduled"]
+
+
+def unconfirmed_pairs(records: Sequence[MatchRecord]) -> list[tuple[str, str]]:
+    return [(r.home, r.away) for r in records if r.status == "unconfirmed"]
 
 
 def derive_opening_snapshot(
@@ -438,5 +495,10 @@ def build_quality_report(
         issues.append(AuditIssue("annual_blocked", "No hay una Tabla Anual autoritativa; se bloquean copas y descenso.", "blocked", "annual"))
 
     level = "blocked" if any(i.level == "blocked" for i in issues) else "warning" if issues else "ok"
-    details.append(f"Fixture: {sum(r.status != 'scheduled' for r in records)} jugados · {sum(r.status == 'scheduled' for r in records)} pendientes")
+    details.append(
+        "Fixture: "
+        f"{sum(r.status == 'played' for r in records)} jugados · "
+        f"{sum(r.status == 'scheduled' for r in records)} pendientes · "
+        f"{sum(r.status == 'unconfirmed' for r in records)} sin confirmar"
+    )
     return DataQualityReport(level, issues, details, authoritative, opening, records)

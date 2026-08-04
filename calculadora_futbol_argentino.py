@@ -1,7 +1,7 @@
 """
 ⚽ Calculadora de escenarios — LPF 2026
 Convertido de Jupyter Notebook (v2) a Streamlit
-Actualización 3.7.0: próximo partido por calendario real y otra cancha por objetivo.
+Actualización 3.7.2: respaldo completo de resultados, fixture y postergados.
 """
 
 import streamlit as st
@@ -13,6 +13,11 @@ import requests
 from lpf_data_quality import (
     build_quality_report, derive_opening_from_results, derive_opening_snapshot, flatten_zones,
     pending_pairs, sum_opening_and_zones, validate_annual,
+)
+from lpf_fixture_sources import (
+    expected_played_count, merge_match_records, parse_futbolargentino_results_html,
+    played_pending_from_records, read_snapshot, records_from_legacy, snapshot_age_hours,
+    snapshot_payload, validate_fixture_records, write_snapshot,
 )
 from lpf_models import AuditIssue, DataQualityReport
 from lpf_competition_narratives import (
@@ -2041,7 +2046,10 @@ FUTBOLARGENTINO_ANNUAL_URL = (
     "tabla-general/tabla-de-posiciones"
 )
 FUTBOLARGENTINO_REFERER = "https://www.futbolargentino.com/primera-division/"
-LPF_SNAPSHOT_MAX_AGE_HOURS = 168  # una semana; después obliga a revisar/cargar manualmente
+FUTBOLARGENTINO_RESULTS_URL = "https://www.futbolargentino.com/primera-division/resultados"
+LPF_SNAPSHOT_MAX_AGE_HOURS = 168  # tablas: una semana
+LPF_FIXTURE_SNAPSHOT_MAX_AGE_HOURS = 168  # partidos: una semana, con aviso fuerte después de 36 h
+LPF_FIXTURE_FRESH_HOURS = 36
 
 
 def _source_headers(referer=""):
@@ -2460,7 +2468,7 @@ def _snapshot_payloads():
 
     candidates = []
     session_payload = st.session_state.get("LPF_LAST_VALID_SNAPSHOT")
-    if isinstance(session_payload, dict):
+    if isinstance(session_payload, dict) and session_payload.get("matches"):
         candidates.append(("sesión", session_payload))
     try:
         path = _snapshot_path()
@@ -2752,89 +2760,417 @@ def espn_tabla(liga, timeout=30):
     zonas = "\n".join(f"{max(rs)} {_tr(n)}" for n, rs in sorted(notas.items(), key=lambda kv: max(kv[1])))
     return base, zonas, None
 
-def espn_fixture(liga, dias=120, timeout=30, max_req=30):
-    """Partidos desde ESPN en una ventana de días. Devuelve (jugados, pendientes, nota, error)."""
+def espn_fixture(liga, dias=120, timeout=30, max_req=30, desde=None):
+    """Trae resultados y próximos partidos de ESPN con cobertura histórica.
+
+    Para la LPF 2026 consulta desde el inicio del Clausura, no sólo los últimos
+    días. Así los PJ de la tabla se reconcilian con marcadores concretos y un
+    postergado viejo no provoca que otro partido ya jugado quede marcado como
+    pendiente por descarte.
+
+    Devuelve ``(jugados, pendientes, nota, error)``. Los partidos se identifican
+    por el evento de ESPN y, dentro del motor local, por la pareja canónica de
+    clubes del fixture del Clausura.
+    """
     import datetime as _dt
+
     lg = (liga or "").strip()
+    if not lg:
+        return [], [], "", "Indicá el código de liga."
+
     try:
-        cab = _espn_get(f"https://site.api.espn.com/apis/site/v2/sports/soccer/{lg}/scoreboard", timeout)
-    except Exception as e:
-        return [], [], "", f"No pude obtener el fixture desde ESPN. {e}"
-    hoy = _dt.date.today() - _dt.timedelta(days=3); fin = _dt.date.today() + _dt.timedelta(days=int(dias))
-    cal = []
-    try:
-        for d in (cab.get("leagues") or [{}])[0].get("calendar", []) or []:
+        cab = _espn_get(
+            f"https://site.api.espn.com/apis/site/v2/sports/soccer/{lg}/scoreboard",
+            timeout,
+        )
+    except Exception as exc:
+        return [], [], "", f"No pude obtener el fixture desde ESPN. {exc}"
+
+    today = _dt.date.today()
+    end_date = today + _dt.timedelta(days=max(0, int(dias)))
+
+    def _as_date(value):
+        if isinstance(value, _dt.datetime):
+            return value.date()
+        if isinstance(value, _dt.date):
+            return value
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        for fmt in ("%Y-%m-%d", "%Y%m%d"):
             try:
-                f = _dt.datetime.strptime(str(d)[:10], "%Y-%m-%d").date()
-                if hoy <= f <= fin:
-                    cal.append(f)
-            except Exception:
-                pass
-    except Exception:
-        cal = []
-    jug, pen, vistos = [], [], set()
+                return _dt.datetime.strptime(raw[:10], fmt).date()
+            except ValueError:
+                continue
+        return None
+
+    start_date = _as_date(desde)
+    if start_date is None:
+        # Esta aplicación está fijada al Clausura LPF 2026. Julio evita mezclar
+        # resultados del Apertura, donde puede repetirse la misma pareja local/visita.
+        start_date = _dt.date(2026, 7, 1) if lg == "arg.1" else today - _dt.timedelta(days=30)
+    if start_date > end_date:
+        start_date = today
+
+    seen_events: set[str] = set()
+    played_by_pair: dict[tuple[str, str], tuple[str, str, int, int]] = {}
+    pending_by_pair: dict[tuple[str, str], tuple[str, str]] = {}
+    event_meta = dict(st.session_state.get("LPF_EVENT_META") or {})
+    schedule = dict(st.session_state.get("LPF_SCHEDULE") or {})
     globals()["_ESPN_DIA"] = globals().get("_ESPN_DIA") or {}
-    def _absorber(js):
-        for ev in js.get("events", []) or []:
-            eid = ev.get("id")
-            if eid in vistos:
-                continue
-            comp = (ev.get("competitions") or [{}])[0]
-            cs = comp.get("competitors") or []
-            loc = next((c for c in cs if c.get("homeAway") == "home"), None)
-            vis = next((c for c in cs if c.get("homeAway") == "away"), None)
-            if not loc or not vis:
-                continue
-            ln = (loc.get("team") or {}).get("displayName"); vn = (vis.get("team") or {}).get("displayName")
-            if not ln or not vn:
-                continue
-            vistos.add(eid)
+    globals()["_ESPN_FECHA_HORA"] = globals().get("_ESPN_FECHA_HORA") or {}
+
+    def _round_number(event, competition):
+        candidates = [
+            (competition.get("week") or {}).get("number") if isinstance(competition.get("week"), dict) else competition.get("week"),
+            (event.get("week") or {}).get("number") if isinstance(event.get("week"), dict) else event.get("week"),
+        ]
+        for value in candidates:
             try:
-                _iso = str(ev.get("date") or comp.get("date") or "").strip()
-                _d = _iso[:10]
-                if _d:
-                    _canon_pair = (canon_club(ln), canon_club(vn))
-                    globals()["_ESPN_DIA"][(ln, vn)] = _d
-                    globals()["_ESPN_DIA"][_canon_pair] = _d
-                    globals()["_ESPN_FECHA_HORA"] = globals().get("_ESPN_FECHA_HORA") or {}
-                    globals()["_ESPN_FECHA_HORA"][(ln, vn)] = _iso
-                    globals()["_ESPN_FECHA_HORA"][_canon_pair] = _iso
-                    _schedule = dict(st.session_state.get("LPF_SCHEDULE") or {})
-                    _schedule[f"{_canon_pair[0]}|||{_canon_pair[1]}"] = _iso
-                    st.session_state["LPF_SCHEDULE"] = _schedule
-            except Exception:
-                pass
-            t = ((comp.get("status") or {}).get("type") or {})
-            estado = str(t.get("state", "")).lower(); done = bool(t.get("completed"))
-            nm = str(t.get("name", "")).upper()
-            if "POSTPON" in nm or "CANCEL" in nm or "ABANDON" in nm:
+                return int(value)
+            except (TypeError, ValueError):
                 continue
-            if done or estado == "post":
+        return None
+
+    def _absorber(payload):
+        for event in payload.get("events", []) or []:
+            competition = (event.get("competitions") or [{}])[0]
+            competitors = competition.get("competitors") or []
+            home = next((item for item in competitors if item.get("homeAway") == "home"), None)
+            away = next((item for item in competitors if item.get("homeAway") == "away"), None)
+            if not home or not away:
+                continue
+
+            home_name = (home.get("team") or {}).get("displayName")
+            away_name = (away.get("team") or {}).get("displayName")
+            if not home_name or not away_name:
+                continue
+
+            canonical_pair = (canon_club(home_name), canon_club(away_name))
+            iso_value = str(event.get("date") or competition.get("date") or "").strip()
+            event_id = str(event.get("id") or f"{canonical_pair[0]}|{canonical_pair[1]}|{iso_value}")
+            if event_id in seen_events:
+                continue
+            seen_events.add(event_id)
+
+            status_type = ((competition.get("status") or {}).get("type") or {})
+            state = str(status_type.get("state") or "").lower()
+            completed = bool(status_type.get("completed"))
+            status_name = str(status_type.get("name") or "").upper()
+            round_number = _round_number(event, competition)
+
+            if iso_value:
+                globals()["_ESPN_DIA"][(home_name, away_name)] = iso_value[:10]
+                globals()["_ESPN_DIA"][canonical_pair] = iso_value[:10]
+                globals()["_ESPN_FECHA_HORA"][(home_name, away_name)] = iso_value
+                globals()["_ESPN_FECHA_HORA"][canonical_pair] = iso_value
+                schedule[f"{canonical_pair[0]}|||{canonical_pair[1]}"] = iso_value
+
+            event_meta[f"{canonical_pair[0]}|||{canonical_pair[1]}"] = {
+                "event_id": event_id,
+                "scheduled_at": iso_value,
+                "state": state,
+                "completed": completed,
+                "status_name": status_name,
+                "round": round_number,
+            }
+
+            # Cancelados o abandonados no se toman como jugados. Un postergado
+            # sigue existiendo en el fixture local y volverá a aparecer cuando ESPN
+            # publique su nueva programación.
+            if any(token in status_name for token in ("CANCEL", "ABANDON")):
+                pending_by_pair.pop(canonical_pair, None)
+                continue
+            if "POSTPON" in status_name:
+                continue
+
+            if completed or state == "post":
                 try:
-                    jug.append((ln, vn, int(loc.get("score")), int(vis.get("score"))))
-                except Exception:
-                    pass
-            elif estado in ("pre", "in"):
-                pen.append((ln, vn))
-    url_r = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{lg}/scoreboard?dates={hoy:%Y%m%d}-{fin:%Y%m%d}"
-    nota = ""
+                    result = (
+                        home_name,
+                        away_name,
+                        int(float(home.get("score"))),
+                        int(float(away.get("score"))),
+                    )
+                except (TypeError, ValueError):
+                    continue
+                played_by_pair[canonical_pair] = result
+                pending_by_pair.pop(canonical_pair, None)
+            elif state in ("pre", "in") and canonical_pair not in played_by_pair:
+                pending_by_pair[canonical_pair] = (home_name, away_name)
+
+    # La respuesta sin rango suele contener la jornada activa y el calendario.
+    _absorber(cab)
+
+    # Consultas por bloques cortos: son más confiables que una sola ventana enorme
+    # y requieren muchas menos llamadas que pedir cada día por separado.
+    chunk_days = 21
+    cursor = start_date
+    requests_used = 0
+    failed_chunks = 0
+    while cursor <= end_date and requests_used < max(1, int(max_req)):
+        chunk_end = min(cursor + _dt.timedelta(days=chunk_days - 1), end_date)
+        url = (
+            f"https://site.api.espn.com/apis/site/v2/sports/soccer/{lg}/scoreboard"
+            f"?dates={cursor:%Y%m%d}-{chunk_end:%Y%m%d}"
+        )
+        try:
+            _absorber(_espn_get(url, timeout))
+        except Exception:
+            failed_chunks += 1
+        requests_used += 1
+        cursor = chunk_end + _dt.timedelta(days=1)
+
+    st.session_state["LPF_SCHEDULE"] = schedule
+    st.session_state["LPF_EVENT_META"] = event_meta
+    st.session_state["LPF_RESULTS_COVERAGE"] = {
+        "league": lg,
+        "from": start_date.isoformat(),
+        "to": end_date.isoformat(),
+        "requests": requests_used,
+        "failed_chunks": failed_chunks,
+    }
+
+    played = list(played_by_pair.values())
+    pending = [
+        value for pair, value in pending_by_pair.items()
+        if pair not in played_by_pair
+    ]
+
+    notes = [f"resultados cotejados desde {start_date:%d/%m/%Y}"]
+    if cursor <= end_date:
+        notes.append(f"consulta limitada a {requests_used} bloques")
+    if failed_chunks:
+        notes.append(f"{failed_chunks} bloque(s) no respondieron")
+    note = "(" + " · ".join(notes) + ")"
+
+    if not played and not pending:
+        return [], [], note, (
+            "ESPN no devolvió partidos en la ventana consultada. "
+            "Revisá el código de liga o cargá los resultados manualmente."
+        )
+    return played, pending, note, None
+
+
+
+def _fixture_snapshot_path():
+    """Ruta separada para resultados, programación y postergados."""
+    import os
+    from pathlib import Path
+
+    override = str(os.environ.get("LPF_FIXTURE_SNAPSHOT_PATH", "") or "").strip()
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent / "data" / "lpf_fixture_last_valid.json"
+
+
+def _apply_lpf_fixture_records(records):
+    """Publica fechas y estados para las previas sin depender del nombre ESPN."""
+    schedule = {}
+    event_meta = {}
+    globals()["_ESPN_DIA"] = globals().get("_ESPN_DIA") or {}
+    globals()["_ESPN_FECHA_HORA"] = globals().get("_ESPN_FECHA_HORA") or {}
+
+    for row in records or []:
+        home = str(row.get("home") or "").strip()
+        away = str(row.get("away") or "").strip()
+        if not home or not away:
+            continue
+        key = f"{home}|||{away}"
+        iso_value = str(row.get("scheduled_at") or "").strip()
+        if iso_value:
+            schedule[key] = iso_value
+            globals()["_ESPN_DIA"][(home, away)] = iso_value[:10]
+            globals()["_ESPN_FECHA_HORA"][(home, away)] = iso_value
+        status = str(row.get("status") or "scheduled")
+        event_meta[key] = {
+            "event_id": str(row.get("match_id") or key),
+            "scheduled_at": iso_value,
+            "state": "post" if status == "played" else "in" if status == "live" else "pre",
+            "completed": status == "played",
+            "status_name": status.upper(),
+            "round": int(row.get("round") or 0),
+            "source": str(row.get("source") or ""),
+        }
+
+    # Sólo se reemplaza si la fuente aportó algo; evita borrar una programación
+    # útil de la sesión por una respuesta parcial.
+    if schedule:
+        st.session_state["LPF_SCHEDULE"] = schedule
+    if event_meta:
+        st.session_state["LPF_EVENT_META"] = event_meta
+    st.session_state["LPF_FIXTURE_RECORDS"] = list(records or [])
+
+
+def _save_lpf_fixture_snapshot(records, source_name):
+    """Guarda la última lista validada en sesión y, si el hosting lo permite, en disco."""
+    payload = snapshot_payload(records, source=source_name)
+    st.session_state["LPF_LAST_VALID_FIXTURE"] = payload
     try:
-        _absorber(_espn_get(url_r, timeout))
+        write_snapshot(_fixture_snapshot_path(), payload)
+    except Exception as exc:
+        return f"No pude guardar el respaldo de partidos en disco: {exc}"
+    return ""
+
+
+def _fixture_snapshot_payloads():
+    candidates = []
+    session_payload = st.session_state.get("LPF_LAST_VALID_FIXTURE")
+    if isinstance(session_payload, dict) and session_payload.get("matches"):
+        candidates.append(("sesión", session_payload))
+    try:
+        path = _fixture_snapshot_path()
+        if path.exists():
+            payload = read_snapshot(path)
+            if isinstance(payload, dict) and payload.get("matches"):
+                candidates.append(("disco", payload))
     except Exception:
         pass
-    if not pen and cal:
-        usar = cal[:max_req]
-        if len(cal) > max_req:
-            nota = f"(limité a las próximas {max_req} fechas del calendario)"
-        for f in usar:
-            try:
-                _absorber(_espn_get(f"https://site.api.espn.com/apis/site/v2/sports/soccer/{lg}/scoreboard?dates={f:%Y%m%d}", timeout))
-            except Exception:
-                pass
-    if not jug and not pen:
-        return [], [], "", ("ESPN no devolvió partidos en esa ventana. Probá ampliar los días "
-                            "o revisá el código de liga.")
-    return jug, pen, nota, None
+    return candidates
+
+
+def _load_lpf_fixture_snapshot(zones=None, max_age_hours=LPF_FIXTURE_SNAPSHOT_MAX_AGE_HOURS):
+    expected = expected_played_count(zones)
+    errors = []
+    for location, payload in _fixture_snapshot_payloads():
+        try:
+            age_hours = snapshot_age_hours(payload)
+            if age_hours > float(max_age_hours):
+                errors.append(
+                    f"respaldo de {location} demasiado viejo ({_fmt_num_es(age_hours / 24, 1)} días)"
+                )
+                continue
+            records = validate_fixture_records(
+                payload.get("matches") or [],
+                official_fixture=LPF_FIXTURE,
+                expected_played=expected,
+            )
+            return records, str(payload.get("source") or "fuente desconocida"), age_hours, None
+        except Exception as exc:
+            errors.append(f"respaldo de {location} inválido: {exc}")
+    return [], "", None, " | ".join(errors) if errors else "no existe un respaldo válido de partidos"
+
+
+def futbolargentino_fixture(timeout=30):
+    """Resultados, próximos partidos y postergados desde el respaldo HTML."""
+    html, final_url = _standings_html_get(
+        FUTBOLARGENTINO_RESULTS_URL,
+        FUTBOLARGENTINO_REFERER,
+        timeout=timeout,
+    )
+    records = parse_futbolargentino_results_html(
+        html,
+        canon_club=canon_club,
+        official_fixture=LPF_FIXTURE,
+    )
+    return records, final_url
+
+
+def lpf_fixture_with_fallback(liga="arg.1", zones=None, dias=120, timeout=30, desde="2026-07-01"):
+    """ESPN → FutbolArgentino.com → último JSON válido → carga manual.
+
+    Los PJ de las zonas sirven para validar cuántos marcadores deberían existir,
+    pero nunca para decidir por descarte qué partido se jugó.
+    """
+    if str(liga or "").strip() != "arg.1":
+        played, pending, note, error = espn_fixture(liga, dias, timeout=timeout, desde=desde)
+        return played, pending, note, error, "ESPN", []
+
+    expected = expected_played_count(zones)
+    warnings = []
+    errors = []
+    espn_records = []
+    espn_partial_records = []
+
+    played, pending, espn_note, espn_error = espn_fixture(
+        liga,
+        dias,
+        timeout=timeout,
+        desde=desde,
+    )
+    if not espn_error:
+        try:
+            espn_partial_records = records_from_legacy(
+                played,
+                pending,
+                schedule=st.session_state.get("LPF_SCHEDULE") or {},
+                event_meta=st.session_state.get("LPF_EVENT_META") or {},
+                official_fixture=LPF_FIXTURE,
+                source="ESPN",
+            )
+            espn_records = validate_fixture_records(
+                espn_partial_records,
+                official_fixture=LPF_FIXTURE,
+                expected_played=expected,
+            )
+        except Exception as exc:
+            errors.append(f"ESPN devolvió una cobertura incompleta: {exc}")
+            espn_records = []
+    else:
+        errors.append(espn_error)
+
+    if espn_records:
+        _apply_lpf_fixture_records(espn_records)
+        disk_warning = _save_lpf_fixture_snapshot(espn_records, "ESPN")
+        if disk_warning:
+            warnings.append(disk_warning)
+        played, pending = played_pending_from_records(espn_records)
+        return played, pending, espn_note, None, "ESPN", warnings
+
+    fa_records = []
+    try:
+        fa_records, _final_url = futbolargentino_fixture(timeout=timeout)
+        # Si ESPN aportó algo parcial, se conserva y se completa con la alternativa.
+        fa_records = validate_fixture_records(
+            merge_match_records(espn_partial_records, fa_records),
+            official_fixture=LPF_FIXTURE,
+            expected_played=expected,
+        )
+    except Exception as exc:
+        errors.append(f"FutbolArgentino.com (resultados): {exc}")
+        fa_records = []
+
+    if fa_records:
+        _apply_lpf_fixture_records(fa_records)
+        disk_warning = _save_lpf_fixture_snapshot(fa_records, "FutbolArgentino.com")
+        if disk_warning:
+            warnings.append(disk_warning)
+        warnings.append("ESPN no pudo completar los partidos; se usó FutbolArgentino.com.")
+        played, pending = played_pending_from_records(fa_records)
+        return (
+            played,
+            pending,
+            "(resultados y programación cotejados en la fuente alternativa)",
+            None,
+            "FutbolArgentino.com",
+            warnings,
+        )
+
+    snapshot_records, snapshot_source, age_hours, snapshot_error = _load_lpf_fixture_snapshot(zones)
+    if snapshot_records:
+        _apply_lpf_fixture_records(snapshot_records)
+        played, pending = played_pending_from_records(snapshot_records)
+        warnings.append(
+            "No respondieron las fuentes de partidos. Uso el último respaldo válido "
+            f"({snapshot_source}), guardado hace {_fmt_num_es(age_hours, 1)} horas."
+        )
+        if age_hours is not None and age_hours > LPF_FIXTURE_FRESH_HOURS:
+            warnings.append(
+                "El respaldo tiene más de 36 horas: los marcadores históricos se conservan, "
+                "pero la fecha y hora del próximo partido pueden haber cambiado."
+            )
+        return (
+            played,
+            pending,
+            f"(último respaldo de partidos: {snapshot_source})",
+            None,
+            f"Último respaldo válido · {snapshot_source}",
+            warnings,
+        )
+
+    if snapshot_error:
+        errors.append(f"Último respaldo de partidos: {snapshot_error}")
+    return [], [], "", "No pude obtener resultados y fixture automáticamente. " + " | ".join(errors), "", warnings
 
 def _parse_team_list(texto):
     """Lista tolerante para equipos: una línea, coma o punto medio por nombre."""
@@ -6207,8 +6543,8 @@ def _lpf_rebuild_state(zones, *, played=None, annual_direct=None, opening=None,
         st.session_state.LPF_ANUAL = authoritative
 
     pending = pending_pairs(report.match_records)
-    # El fixture reconciliado manda. Si todavía hay inferencia, el control de datos
-    # lo muestra y el periodista puede completar los marcadores faltantes.
+    # El fixture reconciliado manda. Los estados sin confirmar quedan fuera de
+    # los cálculos y generan un bloqueo visible hasta completar los marcadores.
     rest = {team: 0 for team in flatten_zones(zones)}
     for local, visitor in pending:
         if local in rest: rest[local] += 1
@@ -6292,7 +6628,7 @@ def cargar_lpf_todo():
 
 
 def cargar_lpf_espn(liga="arg.1"):
-    """Actualiza tablas con respaldos y usa ESPN para resultados/fixture."""
+    """Actualiza tablas y partidos con fuentes alternativas y respaldos."""
     if _lpf_opening_is_valid(globals().get("LPF_APERTURA_BASE_2026") or {}):
         st.session_state.LPF_APERTURA = canon_base(LPF_APERTURA_BASE_2026)
 
@@ -6305,13 +6641,19 @@ def cargar_lpf_espn(liga="arg.1"):
     elif not st.session_state.get("LPF_ANUAL"):
         st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
 
-    jug_raw, _pen_raw, nota, ferr = espn_fixture(liga, 120)
+    jug_raw, _pen_raw, nota, ferr, fixture_source, fixture_warnings = lpf_fixture_with_fallback(
+        liga,
+        zones=zones,
+        dias=120,
+        desde="2026-07-01",
+    )
     eqset = {team for base in zones.values() for team in base}
-    played = []
+    played_by_pair = {}
     for local, visitor, gl, gv in (jug_raw or []):
         cl, cv = canon_club(local), canon_club(visitor)
         if cl in eqset and cv in eqset:
-            played.append((cl, cv, int(gl), int(gv)))
+            played_by_pair[(cl, cv)] = (cl, cv, int(gl), int(gv))
+    played = list(played_by_pair.values())
 
     if not st.session_state.get("PROMEDIOS"):
         prev, _pja0, _pav0 = parse_promedios_tabla(
@@ -6337,7 +6679,10 @@ def cargar_lpf_espn(liga="arg.1"):
         "pend": len(state["pendientes"]),
         "nota": nota or "",
         "fixture_err": ferr or "",
+        "fuente_fixture": fixture_source or "",
+        "avisos_fixture": fixture_warnings or [],
         "calidad": report.level,
+        "sin_confirmar": sum(r.status == "unconfirmed" for r in report.match_records),
         "fuente": source_name,
         "avisos_fuente": source_warnings,
     }, None
@@ -6428,7 +6773,7 @@ with st.sidebar:
     ui_caption("Incluye Zonas A y B, Tabla Anual y Promedios (datos internos, **previo a la fecha 2 del Clausura 2026**) "
                "y el **fixture completo de las 16 fechas** para los cruces mano a mano.")
     if st.button("\U0001F504 Actualizar a hoy (automático)", use_container_width=True, key="btn_espn_refresh_side"):
-        with st.spinner("Consultando ESPN y FutbolArgentino.com\u2026"):
+        with st.spinner("Consultando tablas, resultados y respaldos…"):
             _r, _e = cargar_lpf_espn("arg.1")
         if _e:
             ui_warning(_e + "  \u2014 mientras tanto podés pegar las tablas en «Otras formas de cargar».")
@@ -6441,14 +6786,25 @@ with st.sidebar:
 
             if _r.get("avisos_fuente"):
 
-                ui_caption("Respaldo activado: " + " | ".join(_r["avisos_fuente"]))
+                ui_caption("Respaldo de tablas: " + " | ".join(_r["avisos_fuente"]))
+
+            if _r.get("fuente_fixture"):
+                ui_caption("Partidos y programación: " + _r["fuente_fixture"])
+            if _r.get("avisos_fixture"):
+                ui_caption("Respaldo de partidos: " + " | ".join(_r["avisos_fixture"]))
 
             if _r.get("fixture_err"):
 
                 ui_warning("Las tablas se actualizaron, pero no pude actualizar resultados: " + _r["fixture_err"])
 
+            if _r.get("sin_confirmar"):
+                ui_warning(
+                    f"Hay {_r['sin_confirmar']} partido(s) con estado sin confirmar. "
+                    "La aplicación no los toma como jugados ni como pendientes hasta completar los marcadores."
+                )
+
             st.rerun()
-    ui_caption("Intenta ESPN y, si las posiciones son rechazadas, usa FutbolArgentino.com. Si tampoco responde, recupera la última foto válida. También trae los **resultados** (forma y rachas) en un clic. "
+    ui_caption("Para las tablas intenta ESPN, FutbolArgentino.com y la última foto válida. Para resultados, programación y postergados usa ESPN, FutbolArgentino.com y `data/lpf_fixture_last_valid.json`. "
                "_La Tabla Anual se recalcula automáticamente desde el Apertura fijo; revisá el semáforo después de actualizar._")
     with st.expander("\U0001F6E0\ufe0f Otras formas de cargar o editar a mano (avanzado)", expanded=False):
         modo_carga = st.radio("Fuente", ["🇦🇷 LPF 2026 (Clausura: zonas A y B)", "Otra liga / copa (avanzado)"], label_visibility="collapsed")
@@ -6457,7 +6813,7 @@ with st.sidebar:
             ui_caption("Reglamento LPF 2026: dos zonas de 15, una rueda, 16 fechas. Clasifican los **8 primeros de cada zona** "
                        "a Octavos. La **Tabla General** (para copas y descenso) suma Apertura + Clausura.")
             if st.button("⚡ Traer el Clausura automáticamente", use_container_width=True):
-                with st.spinner("Consultando ESPN y FutbolArgentino.com…"):
+                with st.spinner("Consultando tablas, resultados y respaldos…"):
                     _r, _e = cargar_lpf_espn("arg.1")
                 if _e:
                     ui_warning(_e)
@@ -6468,7 +6824,12 @@ with st.sidebar:
 
                     if _r.get("avisos_fuente"):
 
-                        ui_caption("Respaldo activado: " + " | ".join(_r["avisos_fuente"]))
+                        ui_caption("Respaldo de tablas: " + " | ".join(_r["avisos_fuente"]))
+
+                    if _r.get("fuente_fixture"):
+                        ui_caption("Partidos y programación: " + _r["fuente_fixture"])
+                    if _r.get("avisos_fixture"):
+                        ui_caption("Respaldo de partidos: " + " | ".join(_r["avisos_fixture"]))
 
                     if _r.get("fixture_err"):
 
@@ -6840,7 +7201,7 @@ if not st.session_state.ESTADO:
         st.rerun()
     with st.expander("\u2026o traerlo de fuentes autom\u00e1ticas"):
         if st.button("\u26a1 Traer el Clausura autom\u00e1ticamente", use_container_width=True, key="btn_espn_main"):
-            with st.spinner("Consultando ESPN y FutbolArgentino.com\u2026"):
+            with st.spinner("Consultando tablas, resultados y respaldos…"):
                 _r, _e = cargar_lpf_espn("arg.1")
             if _e:
                 ui_error(_e)
@@ -9863,9 +10224,9 @@ def render_data_audit(E):
     c1.metric("Estado", f"{icon} {report.level.upper()}")
     c2.metric("Partidos pendientes", sum(r.status == "scheduled" for r in report.match_records))
     c3.metric("Resultados explícitos", sum(r.status == "played" for r in report.match_records))
-    c4.metric("Partidos inferidos", sum(r.inferred for r in report.match_records))
+    c4.metric("Sin confirmar", sum(r.status == "unconfirmed" for r in report.match_records))
     ui_caption("Una cuenta publicable requiere que el dominio correspondiente no tenga bloqueos. "
-               "Los partidos inferidos sirven para trabajar, pero conviene reemplazarlos por marcadores explícitos.")
+               "Si faltan marcadores, la aplicación no adivina qué partido se jugó: lo deja sin confirmar hasta completar la fuente.")
 
     if report.issues:
         issue_rows = [{
