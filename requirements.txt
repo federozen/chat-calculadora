@@ -8,6 +8,8 @@ lxml>=5.0
 beautifulsoup4>=4.12
 html5lib>=1.1
 
+
+
 # Para narrativa grafica del rediseno (descomenta/usa si los necesitas):
 # plotly>=5.22
 # st.graphviz_chart y st.altair_chart NO requieren paquetes extra (vienen con Streamlit)
