@@ -23,7 +23,7 @@ def safe_guarantee_line(
     team: str,
     rivals_above: int,
 ) -> int:
-    """Cota superior segura para el puntaje del rival k-ésimo.
+    """Línea superior segura para el puntaje del rival k-ésimo.
 
     Devuelve el mayor ``P`` para el que *todavía es posible* que al menos ``k``
     rivales terminen con ``P`` puntos. Por eso, terminar con ``P + 1`` garantiza

@@ -8,7 +8,7 @@ Este módulo separa tres capas que no deben confundirse:
 
 No importa Streamlit y no modifica las garantías matemáticas. La simulación se usa
 sólo como estimación editorial: cada partido pendiente se resuelve una sola vez, por
-lo que respeta los puntos incompatibles de los cruces entre rivales y el doble efecto
+lo que respeta el sobreconteo que producirían los cruces entre rivales y el doble efecto
 de los enfrentamientos directos del equipo consultado.
 """
 from __future__ import annotations
@@ -237,6 +237,7 @@ def _simulate_fixture(
         "cutoff_low": _quantile_int(cutoff_points, 0.25),
         "cutoff_high": _quantile_int(cutoff_points, 0.75),
         "cutoff_mode": int(mode_cutoff) if mode_cutoff is not None else None,
+        "cutoff_interval_label": "50% central (percentiles 25 a 75)",
         "qualification_probability": float(qualified.mean()),
         "target_points_median": _quantile_int(target_totals, 0.50),
         "target_50": threshold(0.50),
@@ -244,6 +245,11 @@ def _simulate_fixture(
         "target_85": threshold(0.85),
         "by_final_points": grouped,
         "tiebreak_note": "La estimación usa la diferencia de gol actual como desempate de referencia.",
+        "model_note": (
+            "El modelo pondera el rendimiento actual regularizado por partidos jugados, "
+            "incorpora una ventaja local moderada, fija 27% de probabilidad de empate y "
+            "usa la diferencia de gol actual sólo como referencia para los desempates futuros."
+        ),
     }
 
 
@@ -330,6 +336,7 @@ def competition_context(
             "team": name,
             "rank": order.index(name) + 1,
             "points": points[name],
+            "played": _stat(base[name], "pj"),
             "games_left": remaining[name],
             "ceiling": ceilings[name],
             "direct_matches": direct,

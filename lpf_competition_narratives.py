@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import Iterable, Mapping, Sequence
 
-from lpf_exact import next_round_rank_bounds
 from lpf_scenarios import exact_result_scenarios, scenario_rank_bounds
+from lpf_display import editorialize_text
 
 
 def _num(value: object, default: int = 0) -> int:
@@ -77,38 +77,6 @@ def _rank_label(best: int | None, worst: int | None) -> str:
     return f"entre {best}º y {worst}º"
 
 
-def _window_rank_bounds(
-    team: str,
-    base: Mapping[str, Mapping[str, object]],
-    games: Sequence[tuple[str, str]],
-) -> tuple[int, int] | None:
-    """Rango exacto por puntos para toda la ventana.
-
-    A diferencia del cálculo rápido de una fecha, contempla correctamente que un
-    equipo pueda disputar dos partidos y que los mismos rivales aparezcan en más
-    de un cruce. Los límites finales se validan contra el tamaño real de la tabla.
-    """
-    if team not in base or not base:
-        return None
-    relevant = [match for match in games if match[0] in base or match[1] in base]
-    result = scenario_rank_bounds(base, relevant, team)
-    if result.get("available"):
-        best = max(1, min(len(base), _num(result.get("best_rank"), 1)))
-        worst = max(best, min(len(base), _num(result.get("worst_rank"), len(base))))
-        return best, worst
-
-    # Respaldo liviano para entornos sin el solver exacto. Sólo se usa cuando el
-    # equipo juega una vez; con dos partidos es preferible no publicar un rango
-    # antes que presentar una cuenta potencialmente falsa.
-    if sum(team in match for match in relevant) == 1:
-        bounds = next_round_rank_bounds(team, base, relevant)
-        if bounds:
-            best = max(1, min(len(base), int(bounds[0])))
-            worst = max(best, min(len(base), int(bounds[1])))
-            return best, worst
-    return None
-
-
 def _round_team_snapshot(
     team: str,
     zones: Mapping[str, Mapping[str, Mapping[str, object]]],
@@ -161,13 +129,14 @@ def _round_zone_sentence(
     cut = rows[cut_index]
     first_out = rows[cut_index + 1] if cut_index + 1 < len(rows) else None
     text = (
-        f"**Zona {label}:** {leader['team']} lidera con {leader['pts']} pts y DG {_signed(leader['dg'])}; "
-        f"{cut['team']} marca el corte en el {cutoff}º puesto con {cut['pts']} pts y DG {_signed(cut['dg'])}"
+        f"**Zona {label}.** {leader['team']} lidera con {_pts(leader['pts'])} en {leader['pj']} PJ "
+        f"y DG {_signed(leader['dg'])}. {cut['team']} ocupa el {cutoff}º y último puesto de clasificación "
+        f"con {_pts(cut['pts'])} en {cut['pj']} PJ y DG {_signed(cut['dg'])}"
     )
     if first_out:
         text += (
-            f", mientras {first_out['team']} es el primero afuera con {first_out['pts']} pts "
-            f"y DG {_signed(first_out['dg'])}."
+            f"; {first_out['team']} es el primero afuera con {_pts(first_out['pts'])} en "
+            f"{first_out['pj']} PJ y DG {_signed(first_out['dg'])}."
         )
         if cut["pts"] == first_out["pts"]:
             text += " Hoy la frontera se define por los criterios de desempate."
@@ -175,198 +144,34 @@ def _round_zone_sentence(
         text += "."
     return text
 
-
 def _round_match_hook(local: dict[str, object], visitor: dict[str, object], *, cutoff: int) -> str:
-    """Presenta el cruce con una consecuencia concreta de la tabla actual."""
     lp = _num(local["row"]["pos"])  # type: ignore[index]
     vp = _num(visitor["row"]["pos"])  # type: ignore[index]
-    lpts = _num(local["row"]["pts"])  # type: ignore[index]
-    vpts = _num(visitor["row"]["pts"])  # type: ignore[index]
-    local_name = str(local["row"]["team"])  # type: ignore[index]
-    visitor_name = str(visitor["row"]["team"])  # type: ignore[index]
+    lr = local["row"]  # type: ignore[assignment]
+    vr = visitor["row"]  # type: ignore[assignment]
     same_zone = local["zone"] == visitor["zone"]
-
-    def gap_text(snapshot: dict[str, object]) -> str:
-        row = snapshot["row"]  # type: ignore[assignment]
-        cut = snapshot["cut"]  # type: ignore[assignment]
-        gap = max(0, _num(cut["pts"]) - _num(row["pts"]))  # type: ignore[index]
-        if gap == 0:
-            return "queda afuera por desempate"
-        if gap == 1:
-            return "está a un punto del corte"
-        return f"está a {gap} puntos del corte"
-
     if not same_zone:
-        if lp > cutoff and vp > cutoff:
-            return (
-                "El interzonal cruza a dos equipos que hoy están fuera del top 8 "
-                "y mueve simultáneamente las dos zonas."
-            )
-        if lp <= cutoff and vp <= cutoff:
-            return (
-                "El interzonal enfrenta a dos equipos que hoy están en playoffs "
-                "y mueve simultáneamente las dos zonas."
-            )
-        inside = local_name if lp <= cutoff else visitor_name
-        outside_snapshot = visitor if lp <= cutoff else local
-        outside = visitor_name if lp <= cutoff else local_name
         return (
-            f"El interzonal encuentra a {inside} dentro del top 8 y a {outside}, que "
-            f"{gap_text(outside_snapshot)}; el resultado mueve simultáneamente las dos zonas."
+            f"El interzonal encuentra a {lr['team']} {local['situation']} y a "
+            f"{vr['team']} {visitor['situation']}; el resultado mueve simultáneamente las dos zonas."
         )
-
-    if (lp <= cutoff) != (vp <= cutoff) and lpts == vpts:
-        inside = local_name if lp <= cutoff else visitor_name
-        outside = visitor_name if lp <= cutoff else local_name
-        return (
-            f"La frontera pasa por este partido: ambos tienen {_pts(lpts)}, pero {inside} "
-            f"está adentro y {outside} queda afuera por desempate."
-        )
-
+    if abs(lp - cutoff) <= 2 and abs(vp - cutoff) <= 2:
+        if _num(lr["pts"]) == _num(vr["pts"]):
+            return (
+                f"La frontera pasa por este partido: los dos tienen {_pts(lr['pts'])}, pero "
+                f"{lr['team']} está {lp}º y {vr['team']} {vp}º por los criterios de desempate."
+            )
+        return "Es un cruce directo alrededor del último puesto de clasificación."
+    if lp == 1 or vp == 1:
+        leader = lr["team"] if lp == 1 else vr["team"]
+        return f"{leader} defiende la punta."
     if lp <= cutoff and vp <= cutoff:
-        if lp <= 3 and vp <= 3:
-            return "Es un duelo de la parte alta entre dos equipos ubicados entre los tres primeros."
-        if lp == 1 or vp == 1:
-            leader = local_name if lp == 1 else visitor_name
-            rival = visitor_name if lp == 1 else local_name
-            return f"{leader} defiende la punta ante {rival}, que también comienza la ventana en playoffs."
-        if lp == cutoff or vp == cutoff:
-            edge = local_name if lp == cutoff else visitor_name
-            rival = visitor_name if lp == cutoff else local_name
-            return f"{edge} ocupa el último puesto de clasificación; {rival} parte más arriba dentro del top 8."
-        if lpts == vpts:
-            higher = local_name if lp < vp else visitor_name
-            return (
-                f"Llegan igualados con {_pts(lpts)}; {higher} aparece más arriba por los criterios de desempate."
-            )
-        return "Los dos comienzan la ventana en zona de playoffs, pero todavía sin margen para relajarse."
-
+        return "Es un duelo entre dos equipos que comienzan la ventana dentro del top 8."
     if (lp <= cutoff) != (vp <= cutoff):
-        inside_name = local_name if lp <= cutoff else visitor_name
-        inside_pos = lp if lp <= cutoff else vp
-        outside_name = visitor_name if lp <= cutoff else local_name
-        outside_snapshot = visitor if lp <= cutoff else local
-        if inside_pos == 1:
-            inside_text = "defiende la punta"
-        elif inside_pos == cutoff:
-            inside_text = "ocupa el último puesto de clasificación"
-        else:
-            inside_text = f"parte {inside_pos}º y dentro del top 8"
-        return f"{inside_name} {inside_text}; {outside_name} {gap_text(outside_snapshot)}."
-
-    if lpts == vpts:
-        cut = local["cut"]  # type: ignore[assignment]
-        gap = max(0, _num(cut["pts"]) - lpts)  # type: ignore[index]
-        if gap == 0:
-            situation = "ambos quedan afuera por desempate"
-        elif gap == 1:
-            situation = "ambos están a un punto del corte"
-        else:
-            situation = f"ambos están a {gap} puntos del corte"
-        return f"Llegan igualados con {_pts(lpts)} y {situation}."
-    local_gap = gap_text(local)
-    visitor_gap = gap_text(visitor)
-    return f"{local_name} {local_gap}; {visitor_name} {visitor_gap}."
-
-def _round_range_sentence(
-    team: str,
-    current_position: int,
-    bounds: tuple[int, int],
-    *,
-    cutoff: int,
-    appearances: int = 1,
-) -> str:
-    """Traduce el rango exacto a una consecuencia periodística no repetitiva."""
-    best, worst = bounds
-    span = worst - best
-    multi = appearances > 1
-    if appearances == 2:
-        games_text = "dos partidos"
-    else:
-        games_text = f"{appearances} partidos"
-
-    if current_position > cutoff and best > cutoff:
-        return (
-            f"{team} no puede entrar al top {cutoff}: "
-            f"su mejor puesto posible por puntos es el {best}º"
-        )
-
-    if current_position <= cutoff and worst <= cutoff:
-        if best == 1:
-            if current_position == 1:
-                return (
-                    f"{team} ya tiene asegurado seguir en playoffs y puede conservar el liderazgo; "
-                    f"su peor ubicación posible es el {worst}º puesto"
-                )
-            return (
-                f"{team} puede terminar como líder y ya tiene asegurado cerrar la ventana "
-                f"dentro del top {cutoff}"
-            )
-        if best == worst:
-            return f"{team} terminará {best}º por puntos y ya aseguró su lugar en el top {cutoff}"
-        return (
-            f"{team} ya tiene asegurado seguir en playoffs y puede terminar "
-            f"{_rank_label(best, worst)}"
-        )
-
-    if current_position > cutoff and best <= cutoff:
-        if current_position == cutoff + 1:
-            opening = f"{team} parte como el primero afuera"
-        elif multi:
-            opening = f"{team} dispone de {games_text} para recuperar terreno"
-        else:
-            opening = f"{team} llega {current_position}º"
-        if best <= 3:
-            upside = (
-                "puede terminar como líder"
-                if best == 1
-                else f"puede trepar hasta el {best}º puesto y entrar al top {cutoff}"
-            )
-        else:
-            upside = f"puede meterse en el top {cutoff}"
-        if span <= 5:
-            return f"{opening}: {upside}; su rango completo es {_rank_label(best, worst)}"
-        return f"{opening}: {upside}, aunque también puede cerrar la ventana afuera"
-
-    if current_position <= cutoff and worst > cutoff:
-        if current_position == 1:
-            return (
-                f"{team} defiende la punta y puede conservarla, pero una mala ventana "
-                f"podría sacarlo del top {cutoff}"
-            )
-        if current_position == cutoff:
-            if best <= 3:
-                upside = "puede terminar como líder" if best == 1 else f"puede subir hasta el {best}º puesto"
-                return (
-                    f"{team} ocupa el último puesto de clasificación: {upside}, "
-                    f"pero también caer fuera del top {cutoff}"
-                )
-            return (
-                f"{team} ocupa el último puesto de clasificación y necesita sumar para no quedar "
-                f"afuera del top {cutoff}"
-            )
-        if best == 1:
-            if multi:
-                return (
-                    f"{team} tiene {games_text} para pelear la punta, aunque una mala ventana "
-                    f"también podría dejarlo fuera de los playoffs"
-                )
-            return (
-                f"{team} puede terminar como líder, pero también corre riesgo de salir "
-                f"del top {cutoff}"
-            )
-        if span <= 5:
-            return (
-                f"{team} parte dentro del top {cutoff}, pero no lo tiene asegurado; "
-                f"puede terminar {_rank_label(best, worst)}"
-            )
-        return (
-            f"{team} comienza en zona de playoffs, pero una mala ventana podría dejarlo afuera"
-        )
-
-    if best == worst:
-        return f"{team} terminará {best}º por puntos"
-    return f"{team} puede terminar {_rank_label(best, worst)}"
+        inside = lr["team"] if lp <= cutoff else vr["team"]
+        outside = vr["team"] if lp <= cutoff else lr["team"]
+        return f"{inside} defiende un lugar de playoffs y {outside} busca meterse en el top 8."
+    return "Los dos necesitan sumar para acercarse al top 8."
 
 def _round_probability_sentence(
     local: str,
@@ -380,10 +185,64 @@ def _round_probability_sentence(
     values.sort(reverse=True)
     favorite = values[0]
     if favorite[0] < 0.40 or abs(pl - pv) < 0.08:
-        lead = "El modelo no marca un favorito fuerte"
+        lead = "La estimación no marca un favorito fuerte"
     else:
-        lead = f"El modelo da una leve ventaja a {favorite[1]}"
-    return f"{lead} ({round(100 * pl)}% local, {round(100 * pe)}% empate, {round(100 * pv)}% visita)."
+        lead = f"La estimación da una leve ventaja a {favorite[1]}"
+    return (
+        f"{lead} ({round(100 * pl)}% triunfo local, {round(100 * pe)}% empate y "
+        f"{round(100 * pv)}% triunfo visitante). Es una frecuencia del modelo, no una cuota ni un pronóstico exacto."
+    )
+
+def _window_rank_sentence(
+    team: str,
+    snapshot: Mapping[str, object],
+    games: Sequence[tuple[str, str]],
+    *,
+    cutoff: int,
+    appearances: int,
+    bounds_cache: dict[tuple[str, str], dict[str, object]],
+) -> str:
+    base = snapshot["base"]  # type: ignore[assignment]
+    zone = str(snapshot["zone"])
+    key = (zone, team)
+    if key not in bounds_cache:
+        zone_games = [match for match in games if match[0] in base or match[1] in base]
+        bounds_cache[key] = scenario_rank_bounds(base, zone_games, team)
+    bounds = bounds_cache[key]
+    if not bounds.get("available"):
+        return ""
+    best = int(bounds["best_rank"])
+    worst = int(bounds["worst_rank"])
+    current = _num(snapshot["row"]["pos"])  # type: ignore[index]
+    games_text = (
+        f"disputa {appearances} partidos en la ventana" if appearances > 1
+        else "disputa un partido en la ventana"
+    )
+    if best > cutoff:
+        return (
+            f"{team} {games_text} y no puede entrar al top 8: su mejor puesto posible por puntos es el {best}º."
+        )
+    if current <= cutoff and worst <= cutoff:
+        if best == 1:
+            return (
+                f"{team} ya tiene asegurado cerrar esta ventana dentro del top 8; puede alcanzar la punta por puntos "
+                f"y su peor ubicación posible es el {worst}º puesto."
+            )
+        return (
+            f"{team} ya tiene asegurado cerrar esta ventana dentro del top 8; su rango posible por puntos es "
+            f"{_rank_label(best, worst)}."
+        )
+    if current <= cutoff:
+        lead = "puede alcanzar la punta por puntos" if best == 1 else f"puede subir hasta el {best}º puesto por puntos"
+        return (
+            f"{team} comienza dentro del top 8: {lead}, pero también puede cerrar la ventana afuera; "
+            f"su peor ubicación posible es el {worst}º puesto."
+        )
+    lead = "puede alcanzar la punta por puntos" if best == 1 else f"puede trepar hasta el {best}º puesto por puntos"
+    return (
+        f"{team} parte fuera del top 8: {lead} y meterse en zona de clasificación, aunque también puede "
+        f"terminar la ventana afuera; su peor ubicación posible es el {worst}º puesto."
+    )
 
 
 def _round_result_branch(
@@ -511,75 +370,6 @@ def _cup_result_rank_summary(
     return "; ".join(parts)
 
 
-def _cup_window_sentence(
-    bounds: tuple[int, int],
-    *,
-    current_position: int,
-    lib_cut: int,
-    sud_cut: int,
-) -> str:
-    """Resume el movimiento posible sin recitar un rango técnico completo."""
-    best, worst = bounds
-
-    if worst <= lib_cut:
-        if best == 1:
-            return "En esta ventana puede terminar como líder y no puede salir de la zona de Libertadores."
-        return "En esta ventana no puede salir de la zona de Libertadores."
-
-    if best <= lib_cut and worst <= sud_cut:
-        if current_position <= lib_cut:
-            if best == 1:
-                return (
-                    "En esta ventana puede sostener su lugar en la Libertadores e incluso terminar como líder, "
-                    "pero también caer a la zona de Sudamericana."
-                )
-            return (
-                "En esta ventana puede sostener su lugar en la Libertadores, aunque también caer "
-                "a la zona de Sudamericana."
-            )
-        if best == 1:
-            return (
-                "En esta ventana puede terminar como líder; incluso en el peor escenario, "
-                "seguirá ocupando un puesto de copa."
-            )
-        return (
-            f"En esta ventana puede subir hasta el {best}º lugar y entrar en zona de Libertadores; "
-            "incluso en el peor escenario, seguirá en puestos de copas."
-        )
-
-    if best <= lib_cut and worst > sud_cut:
-        return (
-            f"En esta ventana puede subir hasta el {best}º lugar y meterse en zona de Libertadores, "
-            "pero también caer fuera de los puestos de copas."
-        )
-
-    if best <= sud_cut and worst <= sud_cut:
-        if current_position <= lib_cut:
-            return (
-                f"En esta ventana puede sostener un lugar de copa, aunque podría caer hasta el {worst}º "
-                "y salir de la zona de Libertadores."
-            )
-        if best <= lib_cut:
-            return (
-                f"En esta ventana puede subir hasta el {best}º y alcanzar la Libertadores; "
-                "su peor escenario todavía lo deja en zona de Sudamericana."
-            )
-        return "En esta ventana no puede salir de los puestos de copas."
-
-    if best <= sud_cut and worst > sud_cut:
-        if current_position <= sud_cut:
-            return (
-                f"En esta ventana puede subir hasta el {best}º lugar, pero también caer fuera "
-                "de los puestos de copas."
-            )
-        return (
-            f"En esta ventana puede subir hasta el {best}º lugar y meterse en zona de Sudamericana, "
-            "aunque también puede terminar afuera."
-        )
-
-    return "En esta ventana no puede alcanzar los puestos de copas."
-
-
 def _cup_stake_for_team(
     team: str,
     annual: Mapping[str, Mapping[str, object]],
@@ -595,14 +385,7 @@ def _cup_stake_for_team(
         return ""
     all_rows = ordered_rows(annual)
     raw_row = next((row for row in all_rows if row["team"] == team), None)
-    fixed_set = set(fixed_qualified)
-    effective = []
-    for raw in all_rows:
-        if raw["team"] in fixed_set:
-            continue
-        row_copy = dict(raw)
-        row_copy["pos"] = len(effective) + 1
-        effective.append(row_copy)
+    effective = [row for row in all_rows if row["team"] not in set(fixed_qualified)]
     effective_base = {
         str(row["team"]): annual[str(row["team"])]
         for row in effective
@@ -636,67 +419,48 @@ def _cup_stake_for_team(
 
     if lib_cut and pos <= lib_cut:
         target = "Libertadores"
-        status = "hoy está en zona de Libertadores por la Tabla Anual"
+        status = "hoy ocupa un cupo de Libertadores por la Tabla Anual"
     elif near_lib:
         target = "Libertadores"
         status = (
             "ya aseguró terminar en zona de Libertadores por la Anual"
             if lib_state == "in"
             else (
-                "está igualado en puntos con el último cupo de Libertadores, pero hoy queda afuera por desempate"
+                "sigue en carrera por la Libertadores; está igualado en puntos con el último cupo y hoy queda afuera por desempate"
                 if lib_gap == 0
-                else f"está a {lib_gap} punto{'s' if lib_gap != 1 else ''} del último cupo de Libertadores"
+                else f"sigue en carrera por la Libertadores; está a {lib_gap} punto{'s' if lib_gap != 1 else ''} del último cupo"
             )
         )
     elif pos <= sud_cut:
         target = "Sudamericana"
-        status = "hoy está en zona de Sudamericana por la Tabla Anual"
+        status = "hoy ocupa un cupo de Sudamericana por la Tabla Anual"
     else:
         target = "Sudamericana"
         status = (
             "ya aseguró terminar en zona de Sudamericana por la Anual"
             if sud_state == "in"
             else (
-                "está igualado en puntos con el último cupo de Sudamericana, pero hoy queda afuera por desempate"
+                "sigue en carrera por la Sudamericana; está igualado en puntos con el último cupo y hoy queda afuera por desempate"
                 if sud_gap == 0
-                else f"está a {sud_gap} punto{'s' if sud_gap != 1 else ''} del último cupo de Sudamericana"
+                else f"sigue en carrera por la Sudamericana; está a {sud_gap} punto{'s' if sud_gap != 1 else ''} del último cupo"
             )
         )
 
-    raw_pos = _num(raw_row["pos"])
-    if raw_pos == pos:
-        position_text = f"está {raw_pos}º en la Tabla Anual"
-    else:
-        excluded_above = [
-            str(item["team"])
-            for item in all_rows
-            if _num(item["pos"]) < raw_pos and item["team"] in fixed_set
-        ]
-        if len(excluded_above) == 1:
-            reason = f", porque {excluded_above[0]} ya está clasificado por otra vía"
-        elif excluded_above:
-            reason = ", porque por delante hay clubes ya clasificados por otras vías"
+    text = (
+        f"**Copas — {team}:** está {raw_row['pos']}º en la Tabla Anual con {_pts(raw_row['pts'])} en "
+        f"{raw_row['pj']} PJ y {pos}º entre los equipos elegibles; {status}."
+    )
+    bounds = scenario_rank_bounds(
+        effective_base,
+        [m for m in games if m[0] in effective_base or m[1] in effective_base],
+        team,
+    )
+    if bounds.get("available"):
+        best, worst = int(bounds["best_rank"]), int(bounds["worst_rank"])
+        if best == 1:
+            text += f" En esta ventana puede alcanzar el primer lugar por puntos y caer hasta el {worst}º entre los elegibles."
         else:
-            reason = ""
-        teams_ahead = max(0, pos - 1)
-        if teams_ahead == 0:
-            race_text = "lidera la carrera por los cupos"
-        elif teams_ahead == 1:
-            race_text = "tiene un equipo por delante en la carrera por los cupos"
-        else:
-            race_text = f"tiene {teams_ahead} equipos por delante en la carrera por los cupos"
-        position_text = f"figura {raw_pos}º en la Tabla Anual, pero {race_text}{reason}"
-
-    status_sentence = status[:1].upper() + status[1:]
-    text = f"**Copas — {team}:** {position_text}. {status_sentence}."
-    bounds = _window_rank_bounds(team, effective_base, games)
-    if bounds:
-        text += " " + _cup_window_sentence(
-            bounds,
-            current_position=pos,
-            lib_cut=lib_cut,
-            sud_cut=sud_cut,
-        )
+            text += f" En esta ventana puede cerrar {_rank_label(best, worst)} entre los elegibles por puntos."
     if detailed:
         branch = _cup_result_rank_summary(
             team,
@@ -750,25 +514,23 @@ def _relegation_stake_for_team(
         pos = _num(annual_row["pos"])
         if pos > safe_pos:
             gap = max(0, _num(safe_row["pts"]) - _num(annual_row["pts"]))
-            if gap == 0:
-                situation = (
-                    "está en zona de descenso anual: iguala en puntos con el último que se salva, "
-                    "pero queda debajo por desempate"
-                )
-            else:
-                situation = f"está en zona de descenso anual, a {gap} punto{'s' if gap != 1 else ''} del último puesto de salvación"
+            situation = (
+                "está en zona de descenso anual por desempate"
+                if gap == 0 else
+                f"está en zona de descenso anual, a {gap} punto{'s' if gap != 1 else ''} del último puesto de salvación"
+            )
         else:
             cushion = max(0, _num(annual_row["pts"]) - _num(drop_row["pts"]))
-            if cushion == 0:
-                situation = (
-                    "está fuera del descenso anual sólo por desempate: iguala en puntos con el primer equipo que hoy descendería"
-                )
-            else:
-                situation = f"está {cushion} punto{'s' if cushion != 1 else ''} por encima de la zona de descenso anual"
-        text = f"**Anual — {team}:** está {pos}º con {_pts(annual_row['pts'])} y {situation}."
-        bounds = _window_rank_bounds(team, annual, games)
-        if bounds:
-            text += f" Puede cerrar la ventana {_rank_label(bounds[0], bounds[1])}."
+            situation = (
+                "está fuera del descenso anual sólo por desempate"
+                if cushion == 0 else
+                f"está {cushion} punto{'s' if cushion != 1 else ''} por encima de la zona de descenso anual"
+            )
+        text = f"**Anual — {team}:** está {pos}º con {_pts(annual_row['pts'])} en {annual_row['pj']} PJ y {situation}."
+        bounds = scenario_rank_bounds(annual, games, team)
+        if bounds.get("available"):
+            best, worst = int(bounds["best_rank"]), int(bounds["worst_rank"])
+            text += f" Puede cerrar la ventana {_rank_label(best, worst)} por puntos."
         if detailed:
             branch = _result_rank_summary(
                 team, annual, games, own_match, cutoff=safe_pos,
@@ -792,11 +554,9 @@ def _relegation_stake_for_team(
         safe_index = max(0, len(avg_rows) - avg_count - 1)
         safe_avg = float(avg_rows[safe_index].get("PROMEDIO", 0) or 0) if avg_rows else 0.0
         if pos > len(avg_rows) - avg_count:
-            situation = f"hoy está en zona de descenso por promedios, a {max(0.0, safe_avg - avg):.3f} del último que se salva"
+            situation = "hoy ocupa un puesto de descenso por promedios"
         else:
-            relegated_index = max(0, len(avg_rows) - avg_count)
-            relegated_avg = float(avg_rows[relegated_index].get("PROMEDIO", 0) or 0) if relegated_index < len(avg_rows) else avg
-            situation = f"está {max(0.0, avg - relegated_avg):.3f} por encima de la zona de descenso por promedios"
+            situation = "hoy está fuera del puesto de descenso por promedios"
         pts = _num(row.get("Pts"))
         played = _num(row.get("PJ"))
         text = f"**Promedios — {team}:** está {pos}º con {avg:.3f}; {situation}."
@@ -811,10 +571,7 @@ def _relegation_stake_for_team(
                 f"{after['empata']:.3f} si empata y {after['pierde']:.3f} si pierde."
             )
             if sum(team in match for match in games) > 1:
-                text += (
-                    " Es una cuenta aislada desde el promedio inicial: el valor del segundo partido "
-                    "dependerá del resultado obtenido en el primero."
-                )
+                text += " Esos valores son antes de su otro partido pendiente en la misma ventana."
         notes.append(text)
 
     if annual_drop_now and avg_drop_now:
@@ -848,13 +605,12 @@ def round_preview_story(
     average_relegations: int = 1,
     include_cups: bool = False,
     include_relegation: bool = False,
-    data_cutoff_label: str | None = None,
 ) -> str:
-    """Narrativa breve para toda una fecha o para un partido puntual.
+    """Narrativa de una ventana completa o de un partido puntual.
 
-    La vista general usa la foto actual, el corte y el rango exacto de puesto para
-    toda la ventana, incluso cuando un equipo juega dos veces. La vista por partido
-    puede agregar las ramas exactas gana/empata/pierde del motor MILP.
+    Los rangos de puesto consideran todos los partidos de la ventana, incluso
+    cuando un club juega dos veces. Son exactos por puntos y no inventan una
+    diferencia de gol futura.
     """
     if not games:
         return "No hay partidos pendientes en la fecha seleccionada."
@@ -863,6 +619,9 @@ def round_preview_story(
     postponed_rounds = dict(postponed_rounds or {})
     annual = dict(annual or {})
     remaining = dict(remaining or {})
+    all_teams = {team for base in zones.values() for team in base}
+    appearances = {team: sum(team in match for match in games) for team in all_teams}
+    multiple = sorted(team for team, count in appearances.items() if count > 1)
 
     def match_order(match: tuple[str, str]) -> tuple[object, ...]:
         kind, zone = match_types.get(match, ("zona", None))
@@ -875,29 +634,27 @@ def round_preview_story(
             return "El partido elegido no pertenece a la fecha seleccionada."
 
     blocks: list[str] = []
-    shown_cup_teams: set[str] = set()
-    shown_relegation_teams: set[str] = set()
-    shown_range_teams: set[str] = set()
-    appearances = {
-        team: sum(team in match for match in games)
-        for base in zones.values()
-        for team in base
-    }
     if selected_match is None:
-        blocks.append(f"## {round_label} — pantallazo general")
-        if data_cutoff_label:
-            blocks.append(f"_Datos actualizados al {data_cutoff_label}, hora de Argentina._")
-        blocks.append(
-            f"La ventana reúne **{len(games)} partidos**. Cada resultado mueve la zona correspondiente y también suma "
-            "para la Tabla Anual, por lo que después impacta en copas y descenso."
+        blocks.append(f"## {round_label}")
+        intro = (
+            f"La ventana reúne **{len(games)} partidos**. Cada encuentro modifica la zona de sus protagonistas "
+            "y suma para la Tabla Anual, por lo que también puede mover la clasificación a las copas y la pelea "
+            "por el descenso."
         )
+        if multiple:
+            verb = "juega" if len(multiple) == 1 else "juegan"
+            intro += (
+                f" **{_team_list(multiple)}** {verb} dos veces; sus rangos contemplan ambos encuentros."
+            )
+        blocks.append(intro)
         for label in sorted(zones):
             blocks.append(_round_zone_sentence(str(label), zones[label], cutoff=cutoff))
         blocks.append("### Partido por partido")
     else:
         blocks.append(f"## {round_label} — partido elegido")
-        if data_cutoff_label:
-            blocks.append(f"_Datos actualizados al {data_cutoff_label}, hora de Argentina._")
+
+    bounds_cache: dict[tuple[str, str], dict[str, object]] = {}
+    seen_teams: set[str] = set()
 
     for local, visitor in ordered_games:
         local_snapshot = _round_team_snapshot(local, zones, cutoff=cutoff)
@@ -908,40 +665,31 @@ def round_preview_story(
         kind, zone = match_types.get((local, visitor), ("zona", None))
         type_label = f"Zona {zone}" if kind == "zona" and zone else "Interzonal"
         postponed = postponed_rounds.get((local, visitor))
-        timing = f" · postergado de la Fecha {postponed}" if postponed is not None else ""
+        timing = f" · pendiente de la Fecha {postponed}" if postponed is not None else ""
         lr = local_snapshot["row"]
         vr = visitor_snapshot["row"]
-        paragraph = [f"**{local} – {visitor} ({type_label}{timing}).**"]
+        paragraph = [f"**{local}–{visitor} ({type_label}{timing}).**"]
         paragraph.append(
-            f"{local} llega {lr['pos']}º de la Zona {local_snapshot['zone']} con {_pts(lr['pts'])} y DG {_signed(lr['dg'])}; "
-            f"{visitor}, {vr['pos']}º de la Zona {visitor_snapshot['zone']} con {_pts(vr['pts'])} y DG {_signed(vr['dg'])}."
+            f"{local} llega {lr['pos']}º de la Zona {local_snapshot['zone']}, con {_pts(lr['pts'])} en "
+            f"{lr['pj']} PJ y DG {_signed(lr['dg'])}. {visitor} está {vr['pos']}º de la Zona "
+            f"{visitor_snapshot['zone']}, con {_pts(vr['pts'])} en {vr['pj']} PJ y DG {_signed(vr['dg'])}."
         )
         paragraph.append(_round_match_hook(local_snapshot, visitor_snapshot, cutoff=cutoff))
 
-        ranges: list[str] = []
         for team, snapshot in ((local, local_snapshot), (visitor, visitor_snapshot)):
-            # En el pantallazo general, el panorama de toda la ventana se cuenta
-            # una sola vez por equipo. En la vista de un partido se muestra siempre.
-            if selected_match is None and team in shown_range_teams:
-                continue
-            base = snapshot["base"]
-            zone_games = [match for match in games if match[0] in base or match[1] in base]
-            bounds = _window_rank_bounds(team, base, zone_games)
-            if bounds:
-                current_position = _num(snapshot["row"]["pos"])  # type: ignore[index]
-                ranges.append(
-                    _round_range_sentence(
-                        team,
-                        current_position,
-                        bounds,
-                        cutoff=cutoff,
-                        appearances=appearances.get(team, 1),
-                    )
+            count = appearances.get(team, 1)
+            if count > 1 and team in seen_teams and selected_match is None:
+                paragraph.append(
+                    f"{team} disputa acá su otro partido de la ventana; el rango global informado en su primera "
+                    "aparición ya contempla los dos encuentros."
                 )
-                if selected_match is None:
-                    shown_range_teams.add(team)
-        if ranges:
-            paragraph.append("Al cierre de la ventana, " + "; ".join(ranges) + ".")
+            else:
+                sentence = _window_rank_sentence(
+                    team, snapshot, games, cutoff=cutoff, appearances=count, bounds_cache=bounds_cache,
+                )
+                if sentence:
+                    paragraph.append(sentence)
+            seen_teams.add(team)
 
         if selected_match is not None or detailed:
             prob_sentence = _round_probability_sentence(local, visitor, probabilities.get((local, visitor)))
@@ -951,8 +699,7 @@ def round_preview_story(
 
         stakes: list[str] = []
         for team in (local, visitor):
-            show_cup = include_cups and (selected_match is not None or team not in shown_cup_teams)
-            if show_cup:
+            if include_cups:
                 cup = _cup_stake_for_team(
                     team,
                     annual,
@@ -965,11 +712,7 @@ def round_preview_story(
                 )
                 if cup:
                     stakes.append(cup)
-                    shown_cup_teams.add(team)
-            show_relegation = include_relegation and (
-                selected_match is not None or team not in shown_relegation_teams
-            )
-            if show_relegation:
+            if include_relegation:
                 relegation = _relegation_stake_for_team(
                     team,
                     annual,
@@ -982,9 +725,8 @@ def round_preview_story(
                 )
                 if relegation:
                     stakes.append(relegation)
-                    shown_relegation_teams.add(team)
         if stakes:
-            blocks.append("**Impacto en otras tablas:**\n" + "\n".join(f"- {stake}" for stake in stakes))
+            blocks.append("**Impacto en otras tablas**\n" + "\n".join(f"- {stake}" for stake in stakes))
 
         if detailed:
             local_branch = _round_result_branch(
@@ -998,27 +740,25 @@ def round_preview_story(
             if visitor_branch:
                 blocks.append(visitor_branch)
 
-    if detailed:
+    if selected_match is None:
+        blocks.append(
+            "_Los rangos consideran todos los partidos de la ventana, incluidos los equipos que juegan dos veces. "
+            "Son exactos por puntos. Cuando puede haber igualdad, contemplan un desempate favorable o adverso sin "
+            "inventar una diferencia de gol futura. Las probabilidades, cuando aparecen, son una estimación separada "
+            "y no modifican esas cuentas._"
+        )
+    elif detailed:
         blocks.append(
             "_Las ramas gana/empata/pierde son exactas por puntos. Si hay igualdad, el rango contempla un desempate "
-            "favorable o adverso: no inventa diferencia de gol futura._"
-        )
-    elif selected_match is None:
-        blocks.append(
-            "_Las cuentas de puesto son exactas por puntos para toda la ventana, también cuando un equipo juega dos veces. "
-            "Cuando el rango completo es demasiado amplio para aportar una conclusión útil, el relato prioriza si puede "
-            "entrar, salir o asegurar el top 8. Si hay igualdad, contempla un desempate favorable o adverso sin inventar "
-            "diferencia de gol futura. Las probabilidades son una estimación separada y no modifican las cuentas._"
+            "favorable o adverso sin inventar una diferencia de gol futura._"
         )
     if (include_cups or include_relegation) and annual:
         blocks.append(
-            "_Los cupos se leen sobre la Tabla Anual vigente. Para la carrera por esas plazas se descuentan los clubes "
-            "que ya se clasificaron por otra vía. Los campeones todavía pendientes pueden modificar el corte; la Copa "
-            "Argentina conserva sus reglas propias de reasignación y no siempre hace correr directamente la Tabla Anual. "
-            "En promedios se muestra el efecto exacto del resultado sobre el coeficiente propio, no una posición futura asegurada._"
+            "_En la Tabla Anual se distingue la posición general de la posición entre los equipos elegibles para las "
+            "copas. Los campeones pendientes todavía pueden modificar esa distribución. En los promedios se informa "
+            "el efecto exacto de cada resultado sobre el coeficiente propio, pero no se asegura una posición futura._"
         )
-    return "\n\n".join(blocks)
-
+    return editorialize_text("\n\n".join(blocks))
 
 def _tiebreak_between(above: Mapping[str, object], below: Mapping[str, object]) -> str:
     if _num(above.get("pts")) != _num(below.get("pts")):
@@ -1061,19 +801,19 @@ def zone_story(
     if first_out:
         lines.append(
             f"El corte está en el **{top_n}º puesto**: **{cutoff['team']}** está adentro con "
-            f"**{_pts(cutoff['pts'])}**, DG **{_signed(cutoff['dg'])}** y {_gf(cutoff)} GF. "
-            f"El primero afuera es **{first_out['team']}**, también con **{_pts(first_out['pts'])}**, "
+            f"**{_pts(cutoff['pts'])}** en **{cutoff['pj']} PJ**, DG **{_signed(cutoff['dg'])}** y {_gf(cutoff)} GF. "
+            f"El primero afuera es **{first_out['team']}**, con **{_pts(first_out['pts'])}** en **{first_out['pj']} PJ**, "
             f"DG **{_signed(first_out['dg'])}** y {_gf(first_out)} GF."
         )
     else:
         lines.append(
-            f"El último puesto de clasificación es de **{cutoff['team']}**, con {_pts(cutoff['pts'])}."
+            f"El último puesto de clasificación es de **{cutoff['team']}**, con {_pts(cutoff['pts'])} en {cutoff['pj']} PJ."
         )
 
     tied = [row for row in rows if row["pts"] == cutoff["pts"]]
     if len(tied) > 1:
         tied_text = " · ".join(
-            f"{row['pos']}º {row['team']} (DG {_signed(row['dg'])}, {_gf(row)} GF)" for row in tied
+            f"{row['pos']}º {row['team']} ({row['pj']} PJ, DG {_signed(row['dg'])}, {_gf(row)} GF)" for row in tied
         )
         lines.append(
             "**Equipos igualados en los puntos del corte:** " + tied_text + ". "
@@ -1142,7 +882,7 @@ def zone_story(
     lines.append(
         "_Es una fotografía exacta de la tabla validada. No proyecta dónde terminará el corte ni asigna resultados futuros._"
     )
-    return "\n\n".join(lines)
+    return editorialize_text("\n\n".join(lines))
 
 
 def _effective_order(
@@ -1186,12 +926,12 @@ def libertadores_story(
 
     if qualifiers:
         q_text = " · ".join(
-            f"{row['team']} ({row['pts']} pts, DG {_signed(row['dg'])})" for row in qualifiers
+            f"{row['team']} ({row['pts']} pts, {row['pj']} PJ, DG {_signed(row['dg'])})" for row in qualifiers
         )
         lines.append(f"**Hoy entrarían por la Anual:** {q_text}.")
     if waiting:
         lines.append(
-            f"El primero que espera es **{waiting['team']}**, con **{waiting['pts']} puntos**, "
+            f"El primero que espera es **{waiting['team']}**, con **{waiting['pts']} puntos en {waiting['pj']} PJ**, "
             f"DG **{_signed(waiting['dg'])}** y {_gf(waiting)} GF."
         )
 
@@ -1245,7 +985,7 @@ def libertadores_story(
     lines.append("### Cómo se mueve la línea")
     lines.append(
         "- Si un equipo que hoy ocupa uno de los cupos por tabla gana el **Clausura** o la **Copa Argentina**, "
-        "sale de la lista de la Anual por tener una plaza propia y entra el siguiente equipo de la tabla."
+        "sale de la lista de la Anual por tener una plaza propia y entra el siguiente equipo elegible."
     )
     lines.append(
         "- Si el campeón del Apertura también gana el Clausura, se habilita **un lugar adicional por la Tabla General** "
@@ -1268,7 +1008,7 @@ def libertadores_story(
         "_La tabla de hoy es una foto provisional: los campeones futuros no agregan siempre un cupo nuevo, pero pueden "
         "cambiar qué equipos se excluyen de la Tabla General y hacer correr la línea hacia abajo._"
     )
-    return "\n\n".join(lines)
+    return editorialize_text("\n\n".join(lines))
 
 
 def sudamericana_story(
@@ -1297,14 +1037,14 @@ def sudamericana_story(
     if sud:
         lines.append(
             "**Hoy ocuparían los seis lugares:** "
-            + " · ".join(f"{row['team']} ({row['pts']} pts, DG {_signed(row['dg'])})" for row in sud)
+            + " · ".join(f"{row['team']} ({row['pts']} pts, {row['pj']} PJ, DG {_signed(row['dg'])})" for row in sud)
             + "."
         )
     if waiting:
         last = sud[-1]
         lines.append(
-            f"El último cupo es de **{last['team']}** con **{last['pts']} puntos**, DG **{_signed(last['dg'])}**. "
-            f"El primero que espera es **{waiting['team']}** con **{waiting['pts']}**, DG **{_signed(waiting['dg'])}**."
+            f"El último cupo es de **{last['team']}** con **{last['pts']} puntos en {last['pj']} PJ**, DG **{_signed(last['dg'])}**. "
+            f"El primero que espera es **{waiting['team']}** con **{waiting['pts']} en {waiting['pj']} PJ**, DG **{_signed(waiting['dg'])}**."
         )
         if last["pts"] == waiting["pts"]:
             deciding = _tiebreak_between(last, waiting)
@@ -1342,7 +1082,7 @@ def sudamericana_story(
     )
     if copa_snapshot:
         lines.append(f"_Estado de Copa Argentina considerado: {copa_snapshot}._")
-    return "\n\n".join(lines)
+    return editorialize_text("\n\n".join(lines))
 
 
 def relegation_story(
@@ -1373,7 +1113,7 @@ def relegation_story(
         gap = _num(previous_annual["pts"]) - _num(last_annual["pts"])
         lines.append(
             f"Está a **{gap} punto{'s' if gap != 1 else ''}** de **{previous_annual['team']}**, que tiene "
-            f"{previous_annual['pts']} puntos. La DG se muestra como contexto, pero una igualdad en una posición de descenso "
+            f"{previous_annual['pts']} puntos en {previous_annual['pj']} PJ. La DG se muestra como contexto, pero una igualdad en una posición de descenso "
             "se define mediante partido desempate, no por diferencia de gol."
         )
 
@@ -1427,4 +1167,4 @@ def relegation_story(
         "_Es una foto exacta de las tablas cargadas. Los pisos y techos de promedio son rangos matemáticos; no son una "
         "predicción de resultados._"
     )
-    return "\n\n".join(lines)
+    return editorialize_text("\n\n".join(lines))
