@@ -1984,6 +1984,329 @@ ESPN_LIGAS = {
     "Mundial FIFA": "fifa.world",
 }
 
+
+LPF_STANDINGS_SOURCES = (
+    {
+        "name": "AFA oficial",
+        "url": (
+            "https://info.afa.org.ar/deposito/html/v3/page.html"
+            "?channel=deportes.futbol.primeraa&lang=es_LA&page=posiciones"
+        ),
+        "referer": "https://www.afa.com.ar/es/pages/estadisticas-primera-division",
+    },
+    {
+        "name": "Liga Profesional / DataFactory",
+        "url": (
+            "https://datafactory-903663207315-sa-east-1-an.s3.sa-east-1.amazonaws.com/"
+            "html/v3/minapp/modules/futbol/page/page.html"
+            "?channel=deportes.futbol.primeraa&lang=es_LA&page=Fase_1"
+        ),
+        "referer": (
+            "https://www.ligaprofesional.ar/"
+            "torneo-clausura-mercado-libre-2026/"
+        ),
+    },
+)
+
+
+def _source_headers(referer=""):
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/150.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+        "Accept-Language": "es-AR,es;q=0.9,en;q=0.7",
+        "Cache-Control": "no-cache",
+    }
+    if referer:
+        headers["Referer"] = referer
+    return headers
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _official_html_get(url, referer="", timeout=30, retries=1):
+    """Descarga un módulo oficial y conserva el HTML durante diez minutos."""
+    import time
+    import requests as _rq
+
+    last_error = None
+    for attempt in range(int(retries) + 1):
+        try:
+            response = _rq.get(
+                url,
+                headers=_source_headers(referer),
+                timeout=timeout,
+                allow_redirects=True,
+            )
+            if response.status_code == 200:
+                text = response.text or ""
+                if len(text.strip()) < 100:
+                    raise RuntimeError(
+                        f"respondió HTTP 200, pero entregó sólo {len(text)} caracteres"
+                    )
+                return text, response.url
+            raise RuntimeError(
+                f"respondió HTTP {response.status_code} en {response.url}"
+            )
+        except Exception as exc:
+            last_error = exc
+            if attempt < int(retries):
+                time.sleep(1.25 * (attempt + 1))
+    raise RuntimeError(str(last_error or "no se pudo descargar el módulo"))
+
+
+def _norm_table_label(value):
+    text = str(value or "").strip().lower()
+    try:
+        import unicodedata
+        text = "".join(
+            ch for ch in unicodedata.normalize("NFD", text)
+            if unicodedata.category(ch) != "Mn"
+        )
+    except Exception:
+        pass
+    text = re.sub(r"[^a-z0-9+/-]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _table_int(value, default=None):
+    if value is None:
+        return default
+    text = str(value).strip().replace("−", "-")
+    match = re.search(r"[+-]?\d+", text)
+    if not match:
+        return default
+    try:
+        return int(match.group())
+    except Exception:
+        return default
+
+
+def _flatten_table_columns(df):
+    out = df.copy()
+    cols = []
+    for col in out.columns:
+        if isinstance(col, tuple):
+            pieces = [str(x) for x in col if str(x).lower() != "nan"]
+            cols.append(" ".join(pieces).strip())
+        else:
+            cols.append(str(col).strip())
+    out.columns = cols
+    return out
+
+
+def _find_table_column(columns, aliases):
+    normalized = {col: _norm_table_label(col) for col in columns}
+    for col, norm in normalized.items():
+        if norm in aliases:
+            return col
+    for col, norm in normalized.items():
+        if any(alias and (norm.startswith(alias + " ") or norm.endswith(" " + alias)) for alias in aliases):
+            return col
+    return None
+
+
+def _parse_official_standings_table(df):
+    """Convierte una tabla HTML de posiciones a la estructura interna."""
+    if df is None or getattr(df, "empty", True):
+        return {}, {}
+    table = _flatten_table_columns(df)
+    columns = list(table.columns)
+
+    team_col = _find_table_column(
+        columns,
+        {"equipo", "equipos", "club", "team", "nombre", "institucion"},
+    )
+    pts_col = _find_table_column(
+        columns,
+        {"pts", "pt", "puntos", "punto", "points"},
+    )
+    pj_col = _find_table_column(
+        columns,
+        {"pj", "j", "jug", "jugados", "partidos", "partidos jugados", "played"},
+    )
+    dg_col = _find_table_column(
+        columns,
+        {"dg", "dif", "diff", "diferencia", "diferencia de gol", "+/-"},
+    )
+    gf_col = _find_table_column(
+        columns,
+        {"gf", "g f", "favor", "goles a favor"},
+    )
+    ga_col = _find_table_column(
+        columns,
+        {"gc", "ga", "g c", "contra", "goles en contra"},
+    )
+    zone_col = _find_table_column(
+        columns,
+        {"zona", "grupo", "fase", "group"},
+    )
+
+    if team_col is None:
+        best = None
+        best_score = -1
+        for col in columns:
+            values = [str(v).strip() for v in table[col].tolist()]
+            text_values = [v for v in values if re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", v)]
+            score = len(set(text_values))
+            if score > best_score:
+                best, best_score = col, score
+        team_col = best
+
+    if not team_col or not pts_col or not pj_col:
+        return {}, {}
+
+    base = {}
+    zones = {}
+    for _, row in table.iterrows():
+        raw_team = str(row.get(team_col, "") or "").strip()
+        raw_team = re.sub(r"^\s*\d+[.)-]?\s*", "", raw_team)
+        raw_team = re.sub(r"\s+", " ", raw_team).strip()
+        if not raw_team or _norm_table_label(raw_team) in {"equipo", "club", "team", "nan"}:
+            continue
+        pts = _table_int(row.get(pts_col))
+        pj = _table_int(row.get(pj_col))
+        if pts is None or pj is None:
+            continue
+        team = canon_club(raw_team)
+        if not team:
+            continue
+        gf = _table_int(row.get(gf_col), 0) if gf_col else 0
+        ga = _table_int(row.get(ga_col), 0) if ga_col else 0
+        dg = _table_int(row.get(dg_col), None) if dg_col else None
+        if dg is None:
+            dg = int(gf or 0) - int(ga or 0)
+        base[team] = {
+            "pts": int(pts),
+            "pj": int(pj),
+            "dg": int(dg or 0),
+            "gf": int(gf or 0),
+            "ga": int(ga or 0),
+        }
+        if zone_col:
+            zone_text = str(row.get(zone_col, "") or "").upper()
+            match = re.search(r"\b([AB])\b", zone_text)
+            if match:
+                zones[team] = match.group(1)
+    return base, zones
+
+
+def _known_lpf_zone_rosters():
+    known = {"A": set(), "B": set()}
+    try:
+        for label, raw in (("A", ZONA_A_LPF_2026), ("B", ZONA_B_LPF_2026)):
+            parsed = parse_tabla_anual(raw)[0]
+            known[label] = {canon_club(name) for name in parsed}
+    except Exception:
+        pass
+    return known
+
+
+def _assign_two_zone_tables(candidates):
+    """Asigna dos tablas a A/B por superposición con la foto interna del torneo."""
+    if len(candidates) < 2:
+        return {}
+    known = _known_lpf_zone_rosters()
+    best = None
+    for i, first in enumerate(candidates):
+        for j, second in enumerate(candidates):
+            if i == j:
+                continue
+            score = (
+                len(set(first) & known["A"])
+                + len(set(second) & known["B"])
+                - len(set(first) & known["B"])
+                - len(set(second) & known["A"])
+            )
+            if best is None or score > best[0]:
+                best = (score, first, second)
+    if not best:
+        return {}
+    return {"A": canon_base(best[1]), "B": canon_base(best[2])}
+
+
+def _official_zones_from_html(html):
+    """Extrae las zonas de tablas HTML estáticas o embebidas por el proveedor."""
+    from io import StringIO
+
+    try:
+        tables = pd.read_html(StringIO(html))
+    except Exception as exc:
+        raise RuntimeError(f"no pude leer tablas HTML ({exc})") from exc
+
+    parsed = []
+    for table in tables:
+        base, row_zones = _parse_official_standings_table(table)
+        if len(base) >= 10:
+            parsed.append((base, row_zones))
+
+    if not parsed:
+        raise RuntimeError(
+            "el módulo respondió, pero las filas se cargan con JavaScript y no "
+            "aparecieron como tabla HTML"
+        )
+
+    for base, row_zones in parsed:
+        if row_zones:
+            zones = {
+                "A": {team: stats for team, stats in base.items() if row_zones.get(team) == "A"},
+                "B": {team: stats for team, stats in base.items() if row_zones.get(team) == "B"},
+            }
+            if len(zones["A"]) == 15 and len(zones["B"]) == 15:
+                return {label: canon_base(value) for label, value in zones.items()}
+
+    separate = [base for base, _ in parsed if 13 <= len(base) <= 17]
+    zones = _assign_two_zone_tables(separate)
+    if len(zones.get("A", {})) == 15 and len(zones.get("B", {})) == 15:
+        return zones
+
+    combined = max((base for base, _ in parsed), key=len)
+    if len(combined) >= 28:
+        known = _known_lpf_zone_rosters()
+        zones = {
+            label: {team: stats for team, stats in combined.items() if team in roster}
+            for label, roster in known.items()
+        }
+        if len(zones["A"]) == 15 and len(zones["B"]) == 15:
+            return {label: canon_base(value) for label, value in zones.items()}
+
+    sizes = ", ".join(str(len(base)) for base, _ in parsed)
+    raise RuntimeError(
+        "encontré tablas, pero no pude validar dos zonas de 15 equipos "
+        f"(tamaños detectados: {sizes})"
+    )
+
+
+def official_lpf_zones(source, timeout=30):
+    """Carga y valida las zonas desde una de las páginas oficiales."""
+    html, final_url = _official_html_get(
+        source["url"], source.get("referer", ""), timeout=timeout
+    )
+    zones = _official_zones_from_html(html)
+    return zones, final_url
+
+
+def lpf_zones_with_fallback(liga="arg.1", timeout=30):
+    """ESPN → AFA → LPF/DataFactory, con diagnóstico de cada intento."""
+    errors = []
+    zones, espn_error = espn_lpf_zonas(liga, timeout=timeout)
+    if not espn_error:
+        return zones, "ESPN", errors, None
+    errors.append(espn_error)
+
+    for source in LPF_STANDINGS_SOURCES:
+        try:
+            zones, _final_url = official_lpf_zones(source, timeout=timeout)
+            return zones, source["name"], errors, None
+        except Exception as exc:
+            errors.append(f"{source['name']}: {exc}")
+
+    return {}, "", errors, (
+        "No pude obtener las zonas automáticamente. " + " | ".join(errors)
+    )
+
 @st.cache_data(ttl=600, show_spinner=False)
 def _espn_get(url, timeout=30, retries=2):
     """Consulta ESPN, guarda respuestas 10 minutos e identifica la URL que falla."""
@@ -5430,12 +5753,14 @@ def cargar_lpf_todo():
 
 
 def cargar_lpf_espn(liga="arg.1"):
-    """Actualiza zonas y resultados; la Anual se recalcula desde el Apertura fijo."""
+    """Actualiza zonas con respaldo oficial y usa ESPN para los resultados."""
     if _lpf_opening_is_valid(globals().get("LPF_APERTURA_BASE_2026") or {}):
         st.session_state.LPF_APERTURA = canon_base(LPF_APERTURA_BASE_2026)
-    zones, err = espn_lpf_zonas(liga)
+
+    zones, source_name, source_warnings, err = lpf_zones_with_fallback(liga)
     if err:
         return None, err
+
     jug_raw, _pen_raw, nota, ferr = espn_fixture(liga, 120)
     eqset = {team for base in zones.values() for team in base}
     played = []
@@ -5443,13 +5768,18 @@ def cargar_lpf_espn(liga="arg.1"):
         cl, cv = canon_club(local), canon_club(visitor)
         if cl in eqset and cv in eqset:
             played.append((cl, cv, int(gl), int(gv)))
+
     if not st.session_state.get("LPF_ANUAL"):
         st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
     if not st.session_state.get("PROMEDIOS"):
-        prev, _pja0, _pav0 = parse_promedios_tabla(PROMEDIOS_LPF_2026, st.session_state.get("LPF_ANUAL") or {})
+        prev, _pja0, _pav0 = parse_promedios_tabla(
+            PROMEDIOS_LPF_2026,
+            st.session_state.get("LPF_ANUAL") or {},
+        )
         _record_prom_source_issues(_pav0)
         st.session_state.PROM_TXT = promedios_previas_texto(prev)
         st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
+
     state, report = _lpf_rebuild_state(
         zones,
         played=played,
@@ -5458,11 +5788,16 @@ def cargar_lpf_espn(liga="arg.1"):
     )
     st.session_state.ESTADO = state
     return {
-        "A": len(zones.get("A", {})), "B": len(zones.get("B", {})),
-        "jug": len(played), "pend": len(state["pendientes"]),
-        "nota": nota or "", "fixture_err": ferr or "", "calidad": report.level,
+        "A": len(zones.get("A", {})),
+        "B": len(zones.get("B", {})),
+        "jug": len(played),
+        "pend": len(state["pendientes"]),
+        "nota": nota or "",
+        "fixture_err": ferr or "",
+        "calidad": report.level,
+        "fuente": source_name,
+        "avisos_fuente": source_warnings,
     }, None
-
 
 # ─── SIDEBAR ─────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -5549,16 +5884,28 @@ with st.sidebar:
         st.rerun()
     st.caption("Incluye Zonas A y B, Tabla Anual y Promedios (datos internos, **previo a la fecha 2 del Clausura 2026**) "
                "y el **fixture completo de las 16 fechas** para los cruces mano a mano.")
-    if st.button("\U0001F504 Actualizar a hoy (ESPN)", use_container_width=True, key="btn_espn_refresh_side"):
-        with st.spinner("Trayendo tablas y resultados de ESPN\u2026"):
+    if st.button("\U0001F504 Actualizar a hoy (automático)", use_container_width=True, key="btn_espn_refresh_side"):
+        with st.spinner("Consultando ESPN, AFA y Liga Profesional\u2026"):
             _r, _e = cargar_lpf_espn("arg.1")
         if _e:
             st.warning(_e + "  \u2014 mientras tanto podés pegar las tablas en «Otras formas de cargar».")
         else:
-            st.success(f"Actualizado desde ESPN \u2713 Zona A ({_r['A']}) \u00b7 Zona B ({_r['B']}) \u00b7 "
+            _fuente = _r.get("fuente") or "fuente automática"
+
+            st.success(f"Actualizado desde {_fuente} \u2713 Zona A ({_r['A']}) \u00b7 Zona B ({_r['B']}) \u00b7 "
+
                        f"{_r['jug']} resultados \u00b7 {_r['pend']} pendientes")
+
+            if _r.get("avisos_fuente"):
+
+                st.caption("Respaldo activado: " + " | ".join(_r["avisos_fuente"]))
+
+            if _r.get("fixture_err"):
+
+                st.warning("Las tablas se actualizaron, pero no pude actualizar resultados: " + _r["fixture_err"])
+
             st.rerun()
-    st.caption("Trae las tablas con los **PJ al día** y los **resultados** (forma y rachas) en un clic. "
+    st.caption("Intenta ESPN y, si las posiciones son rechazadas, usa AFA o Liga Profesional. También trae los **resultados** (forma y rachas) en un clic. "
                "_La Tabla Anual se recalcula automáticamente desde el Apertura fijo; revisá el semáforo después de actualizar._")
     with st.expander("\U0001F6E0\ufe0f Otras formas de cargar o editar a mano (avanzado)", expanded=False):
         modo_carga = st.radio("Fuente", ["🇦🇷 LPF 2026 (Clausura: zonas A y B)", "Otra liga / copa (avanzado)"], label_visibility="collapsed")
@@ -5566,13 +5913,24 @@ with st.sidebar:
         if modo_carga == "🇦🇷 LPF 2026 (Clausura: zonas A y B)":
             st.caption("Reglamento LPF 2026: dos zonas de 15, una rueda, 16 fechas. Clasifican los **8 primeros de cada zona** "
                        "a Octavos. La **Tabla General** (para copas y descenso) suma Apertura + Clausura.")
-            if st.button("⚡ Traer el Clausura de ESPN (automático)", use_container_width=True):
-                with st.spinner("Consultando ESPN…"):
+            if st.button("⚡ Traer el Clausura automáticamente", use_container_width=True):
+                with st.spinner("Consultando ESPN, AFA y Liga Profesional…"):
                     _r, _e = cargar_lpf_espn("arg.1")
                 if _e:
                     st.warning(_e)
                 else:
-                    st.success(f"Cargado de ESPN: Zona A ({_r['A']}) y Zona B ({_r['B']}) · {_r['jug']} resultados ✓")
+                    _fuente = _r.get("fuente") or "fuente automática"
+
+                    st.success(f"Cargado desde {_fuente}: Zona A ({_r['A']}) y Zona B ({_r['B']}) · {_r['jug']} resultados ✓")
+
+                    if _r.get("avisos_fuente"):
+
+                        st.caption("Respaldo activado: " + " | ".join(_r["avisos_fuente"]))
+
+                    if _r.get("fixture_err"):
+
+                        st.warning("Las tablas se cargaron, pero no pude actualizar resultados: " + _r["fixture_err"])
+
                     st.rerun()
             _za = st.text_area("Tabla Zona A", height=130, key="lpf_a",
                                placeholder="River Plate, 28, 12, +11\nBoca Juniors, 25, 12, +7\n…")
@@ -5933,13 +6291,13 @@ with st.sidebar:
 
 # ─── MAIN TABS ───────────────────────────────────────────────────────────────────
 if not st.session_state.ESTADO:
-    st.info("\U0001F449 Todav\u00eda no cargaste datos. Toc\u00e1 el bot\u00f3n para cargar el Clausura 2026 completo (o tra\u00e9lo de ESPN).")
+    st.info("\U0001F449 Todav\u00eda no cargaste datos. Toc\u00e1 el bot\u00f3n para cargar el Clausura 2026 completo (o traelo de las fuentes automáticas).")
     if st.button("\U0001F4E5 Cargar TODO (Clausura + Anual + Promedios)", type="primary", use_container_width=True, key="btn_cargar_todo_main"):
         cargar_lpf_todo()
         st.rerun()
-    with st.expander("\u2026o traerlo autom\u00e1tico de ESPN"):
-        if st.button("\u26a1 Traer el Clausura de ESPN (autom\u00e1tico)", use_container_width=True, key="btn_espn_main"):
-            with st.spinner("Consultando ESPN\u2026"):
+    with st.expander("\u2026o traerlo de fuentes autom\u00e1ticas"):
+        if st.button("\u26a1 Traer el Clausura autom\u00e1ticamente", use_container_width=True, key="btn_espn_main"):
+            with st.spinner("Consultando ESPN, AFA y Liga Profesional\u2026"):
                 _r, _e = cargar_lpf_espn("arg.1")
             if _e:
                 st.error(_e)
@@ -7355,7 +7713,7 @@ AYUDA_LPF = """### ⚽ Calculadora LPF 2026 — guía de uso
 
 **Cómo cargar y actualizar los datos**
 1. Botón grande **«📥 Cargar TODO»** — trae de una las dos zonas, la Tabla Anual, los promedios, el fixture de las 16 fechas y los resultados de la fecha 1 (datos internos, sirve sin internet).
-2. **«🔄 Actualizar a hoy (ESPN)»** — una vez por fecha: baja las tablas con los PJ del día **y** los resultados partido a partido (para forma y rachas). Si ESPN no separa las zonas, caés al pegado manual.
+2. **«🔄 Actualizar a hoy (automático)»** — una vez por fecha: intenta ESPN y, si la tabla es rechazada, prueba AFA y Liga Profesional. Los resultados partido a partido siguen llegando desde ESPN; si todas las fuentes fallan, queda el pegado manual.
 3. En **«🛠️ Otras formas de cargar»**: pegar las tablas de Promiedos, editar el histórico, y **«🥅 Resultados partido a partido»** para pegar/actualizar marcadores a mano.
 4. La app te avisa sola si los datos quedaron viejos o si hay una fecha en curso.
 
