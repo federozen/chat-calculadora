@@ -1,7 +1,7 @@
 """
 ⚽ Calculadora de escenarios — LPF 2026
 Convertido de Jupyter Notebook (v2) a Streamlit
-Actualización 3.7.1: resultados históricos, postergados y pendientes reconciliados.
+Actualización 3.7.3: recuperación transaccional de resultados y respaldo completo hasta la Fecha 3.
 """
 
 import streamlit as st
@@ -6157,7 +6157,7 @@ ui_markdown("""
 #  simulador. La tabla (puntos/PJ/DG) sigue siendo la fuente autoritativa; estos
 #  resultados se usan solo para forma/rachas/localía, nunca se re-suman a los puntos.
 # ═══════════════════════════════════════════════════════════════════════════
-RESULTADOS_LPF_2026 = """Belgrano 2-1 Rosario Central
+RESULTADOS_LPF_FECHA_1_2026 = """Belgrano 2-1 Rosario Central
 Sarmiento 2-3 Argentinos
 Defensa y Justicia 1-1 Aldosivi
 Gimnasia (Mza.) 1-0 Central Córdoba
@@ -6172,6 +6172,49 @@ Lanús 1-0 San Lorenzo
 Atlético Tucumán 0-0 Ind. Rivadavia Mza.
 Estudiantes 0-2 Independiente
 Deportivo Riestra 3-0 Boca"""
+
+RESULTADOS_LPF_2026 = """Belgrano 2-1 Rosario Central
+Sarmiento 2-3 Argentinos
+Defensa y Justicia 1-1 Aldosivi
+Gimnasia (Mza.) 1-0 Central Córdoba
+Racing 2-1 Gimnasia
+Vélez 1-0 Instituto
+Huracán 1-0 Banfield
+Platense 2-2 Unión
+Estudiantes (Río Cuarto) 1-0 Tigre
+Newell's 1-0 Talleres
+River 0-1 Barracas Central
+Lanús 1-0 San Lorenzo
+Atlético Tucumán 0-0 Ind. Rivadavia Mza.
+Estudiantes 0-2 Independiente
+Deportivo Riestra 3-0 Boca
+Banfield 3-2 Sarmiento
+San Lorenzo 1-0 Gimnasia (Mza.)
+Rosario Central 0-0 Racing
+Argentinos 3-0 Estudiantes (Río Cuarto)
+Barracas Central 1-0 Aldosivi
+Defensa y Justicia 2-1 Deportivo Riestra
+Gimnasia 1-0 River
+Instituto 2-1 Platense
+Independiente Rivadavia Mza. 2-1 Huracán
+Talleres 1-3 Vélez
+Independiente 1-0 Newell's
+Central Córdoba 0-2 Atlético Tucumán
+Gimnasia (Mza.) 2-0 Unión
+Estudiantes (Río Cuarto) 0-0 Banfield
+Belgrano 0-1 Argentinos
+Estudiantes 3-0 Defensa y Justicia
+Racing 1-3 Tigre
+Deportivo Riestra 0-1 Barracas Central
+Aldosivi 1-2 Gimnasia
+Newell's 2-2 Boca
+River 0-1 Rosario Central
+Lanús 0-1 Instituto
+Sarmiento 2-1 Independiente Rivadavia Mza.
+Platense 0-4 Talleres
+Vélez 1-0 Independiente
+Huracán 0-0 Atlético Tucumán
+Central Córdoba 1-0 San Lorenzo"""
 
 def parse_resultados_lpf(text=None, canon=None):
     """Parsea líneas «Local G1-G2 Visita» → lista de tuplas (local, visita, gl, gv)
@@ -6193,6 +6236,62 @@ def parse_resultados_lpf(text=None, canon=None):
         out.append((canon(m.group(1)), canon(m.group(4)), int(m.group(2)), int(m.group(3))))
     return out
 
+def _merge_lpf_results(*collections):
+    """Une resultados canónicos sin perder la última foto válida.
+
+    Un marcador explícito más nuevo puede reemplazar a uno anterior para la misma
+    pareja, pero una respuesta vacía nunca borra la base que ya estaba validada.
+    """
+    merged = {}
+    for collection in collections:
+        for local, visitor, gl, gv in collection or []:
+            cl, cv = canon_club(local), canon_club(visitor)
+            merged[(cl, cv)] = (cl, cv, int(gl), int(gv))
+    return list(merged.values())
+
+
+def _lpf_result_counts(played):
+    counts = {}
+    for local, visitor, _gl, _gv in played or []:
+        counts[local] = counts.get(local, 0) + 1
+        counts[visitor] = counts.get(visitor, 0) + 1
+    return counts
+
+
+def _lpf_results_fit_zones(zones, played):
+    """Comprueba que los resultados explican exactamente los PJ de las zonas."""
+    teams = {team for base in (zones or {}).values() for team in base}
+    counts = _lpf_result_counts(played)
+    if any(local not in teams or visitor not in teams for local, visitor, _gl, _gv in played or []):
+        return False
+    return all(
+        int((zones[label][team] or {}).get("pj", 0)) == int(counts.get(team, 0))
+        for label in (zones or {})
+        for team in zones[label]
+    )
+
+
+def _lpf_complete_results_for_zones(zones, *collections):
+    """Elige una combinación completa sin inferir partidos por descarte.
+
+    Primero prueba la unión de todas las fuentes. Si una fuente está adelantada
+    respecto de la tabla, prueba cada foto por separado y devuelve la más completa
+    que coincida exactamente con los PJ publicados.
+    """
+    normalized = [_merge_lpf_results(collection) for collection in collections if collection]
+    merged = _merge_lpf_results(*normalized)
+    if merged and _lpf_results_fit_zones(zones, merged):
+        return merged
+    for candidate in sorted(normalized, key=len, reverse=True):
+        if _lpf_results_fit_zones(zones, candidate):
+            return candidate
+    return []
+
+
+def _lpf_builtin_results():
+    return parse_resultados_lpf(RESULTADOS_LPF_2026)
+
+
 def _lpf_builtin_opening_snapshot():
     """Foto fija y autoritativa del Apertura 2026.
 
@@ -6202,7 +6301,7 @@ def _lpf_builtin_opening_snapshot():
     pegada por el usuario queda como control, no como una segunda fuente viva.
     """
     annual_ref = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
-    played_ref = parse_resultados_lpf(RESULTADOS_LPF_2026)
+    played_ref = parse_resultados_lpf(RESULTADOS_LPF_FECHA_1_2026)
     opening, issues = derive_opening_from_results(
         annual_ref, LPF_FIXTURE, played_ref, opening_rounds=16
     )
@@ -6439,6 +6538,29 @@ def _lpf_data_gate(E, domain):
     # También repara sesiones creadas por versiones anteriores antes de decidir.
     try:
         if (E or {}).get("modo") == "lpf2026":
+            zones = (E or {}).get("zonas_lpf") or {}
+            repaired = _lpf_complete_results_for_zones(
+                zones,
+                (E or {}).get("jugados") or [],
+                parse_resultados_lpf(st.session_state.get("LPF_RES_TXT") or ""),
+                _lpf_builtin_results(),
+            )
+            if repaired and len(repaired) != len((E or {}).get("jugados") or []):
+                state, _report = _lpf_rebuild_state(
+                    zones,
+                    played=repaired,
+                    annual_direct=(E or {}).get("anual_directo") or st.session_state.get("LPF_ANUAL") or {},
+                    opening=(E or {}).get("apertura") or st.session_state.get("LPF_APERTURA") or {},
+                    camps=(E or {}).get("camps"),
+                    intl=(E or {}).get("intl"),
+                    n_anual=(E or {}).get("n_anual", 1),
+                    n_prom=(E or {}).get("n_prom", 1),
+                )
+                st.session_state.ESTADO = state
+                st.session_state.LPF_RES_TXT = "\n".join(
+                    f"{local} {gl}-{gv} {visitor}" for local, visitor, gl, gv in repaired
+                )
+                E = state
             _lpf_refresh_quality(E)
     except NameError:
         pass
@@ -6452,21 +6574,39 @@ def _lpf_data_gate(E, domain):
 
 
 def cargar_lpf_todo():
-    """Carga la foto offline y la reconcilia antes de habilitar cálculos."""
+    """Carga la última foto offline válida y la reconcilia antes de calcular."""
     if _lpf_opening_is_valid(globals().get("LPF_APERTURA_BASE_2026") or {}):
         st.session_state.LPF_APERTURA = canon_base(LPF_APERTURA_BASE_2026)
-    if not st.session_state.get("LPF_ANUAL"):
-        st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
+
+    snap_zones, snap_annual, _snap_source, _snap_age, _snap_error = _load_lpf_snapshot()
+    if snap_zones:
+        zones = snap_zones
+        st.session_state.LPF_ANUAL = canon_base(snap_annual)
+    else:
+        b_a = parse_tabla_anual(ZONA_A_LPF_2026)[0]
+        b_b = parse_tabla_anual(ZONA_B_LPF_2026)[0]
+        zones = {"A": canon_base(b_a), "B": canon_base(b_b)}
+        if not st.session_state.get("LPF_ANUAL"):
+            st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
+
     if not st.session_state.get("PROMEDIOS"):
         _pv0, _pja0, _pav0 = parse_promedios_tabla(PROMEDIOS_LPF_2026, st.session_state.get("LPF_ANUAL") or {})
         _record_prom_source_issues(_pav0)
         st.session_state.PROM_TXT = promedios_previas_texto(_pv0)
         st.session_state.PROMEDIOS = parse_promedios(st.session_state.PROM_TXT)
         st.session_state.LPF_HIST_OK = f"{len(st.session_state.LPF_ANUAL)} equipos en la anual · {len(_pv0)} en promedios"
-    b_a = parse_tabla_anual(ZONA_A_LPF_2026)[0]
-    b_b = parse_tabla_anual(ZONA_B_LPF_2026)[0]
-    zones = {"A": canon_base(b_a), "B": canon_base(b_b)}
-    played = parse_resultados_lpf(st.session_state.get("LPF_RES_TXT") or None)
+    manual_played = parse_resultados_lpf(st.session_state.get("LPF_RES_TXT") or "")
+    previous_played = list(((st.session_state.get("ESTADO") or {}).get("jugados") or []))
+    played = _lpf_complete_results_for_zones(
+        zones,
+        previous_played,
+        manual_played,
+        _lpf_builtin_results(),
+    ) or _merge_lpf_results(previous_played, manual_played, _lpf_builtin_results())
+    if played and not st.session_state.get("LPF_RES_TXT"):
+        st.session_state.LPF_RES_TXT = "\n".join(
+            f"{local} {gl}-{gv} {visitor}" for local, visitor, gl, gv in played
+        )
     state, report = _lpf_rebuild_state(
         zones,
         played=played,
@@ -6492,12 +6632,56 @@ def cargar_lpf_espn(liga="arg.1"):
 
     jug_raw, _pen_raw, nota, ferr = espn_fixture(liga, 120, desde="2026-07-01")
     eqset = {team for base in zones.values() for team in base}
-    played_by_pair = {}
+    live_played = []
     for local, visitor, gl, gv in (jug_raw or []):
         cl, cv = canon_club(local), canon_club(visitor)
         if cl in eqset and cv in eqset:
-            played_by_pair[(cl, cv)] = (cl, cv, int(gl), int(gv))
-    played = list(played_by_pair.values())
+            live_played.append((cl, cv, int(gl), int(gv)))
+
+    previous_state = st.session_state.get("ESTADO") or {}
+    previous_played = list(previous_state.get("jugados") or [])
+    manual_played = parse_resultados_lpf(st.session_state.get("LPF_RES_TXT") or "")
+    builtin_played = _lpf_builtin_results()
+    played = _lpf_complete_results_for_zones(
+        zones,
+        live_played,
+        previous_played,
+        manual_played,
+        builtin_played,
+    )
+
+    # La actualización es transaccional: una consulta vacía o incompleta jamás
+    # reemplaza una foto válida por cero resultados. Si ninguna combinación explica
+    # los PJ actuales, se conserva el estado anterior y se informa el problema.
+    if not played:
+        previous_zones = previous_state.get("zonas_lpf") or {}
+        if previous_state and previous_zones:
+            return {
+                "A": len(previous_zones.get("A", {})),
+                "B": len(previous_zones.get("B", {})),
+                "anual": len(previous_state.get("anual_directo") or {}),
+                "jug": len(previous_played),
+                "pend": len(previous_state.get("pendientes") or []),
+                "nota": nota or "",
+                "fixture_err": ferr or "La fuente de resultados quedó incompleta.",
+                "calidad": getattr(previous_state.get("data_quality"), "level", "warning"),
+                "sin_confirmar": sum(
+                    r.status == "unconfirmed"
+                    for r in getattr(previous_state.get("data_quality"), "match_records", [])
+                ),
+                "fuente": source_name,
+                "avisos_fuente": list(source_warnings or []) + [
+                    "No reemplacé la base anterior porque los resultados no explicaban los PJ de la tabla."
+                ],
+            }, None
+        return None, (
+            "Las tablas se actualizaron, pero ninguna fuente de resultados explica "
+            "exactamente los PJ publicados. No se reemplazó la base con datos incompletos."
+        )
+
+    st.session_state.LPF_RES_TXT = "\n".join(
+        f"{local} {gl}-{gv} {visitor}" for local, visitor, gl, gv in played
+    )
 
     if not st.session_state.get("PROMEDIOS"):
         prev, _pja0, _pav0 = parse_promedios_tabla(
