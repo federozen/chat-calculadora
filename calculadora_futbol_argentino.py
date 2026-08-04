@@ -1,7 +1,7 @@
 """
 ⚽ Calculadora de escenarios — LPF 2026
 Convertido de Jupyter Notebook (v2) a Streamlit
-Actualización 3.6.3: narrativas revisadas, PJ completo, nombres argentinos y garantías mejor diferenciadas.
+Actualización 3.6.4: narrativas finales revisadas para playoffs, copas, zonas y previa de fecha.
 """
 
 import streamlit as st
@@ -2484,7 +2484,7 @@ def _load_lpf_snapshot(max_age_hours=LPF_SNAPSHOT_MAX_AGE_HOURS):
             age_hours = max(0.0, (datetime.now(timezone.utc) - updated).total_seconds() / 3600.0)
             if age_hours > float(max_age_hours):
                 errors.append(
-                    f"respaldo de {location} demasiado viejo ({age_hours / 24:.1f} días)"
+                    f"respaldo de {location} demasiado viejo ({_fmt_num_es(age_hours / 24, 1)} días)"
                 )
                 continue
             zones = {
@@ -2571,7 +2571,7 @@ def lpf_tables_with_fallback(liga="arg.1", timeout=30):
                     annual_source = f"último respaldo ({snap_source})"
                     warnings.append(
                         "La Tabla Anual no pudo actualizarse; uso la última válida "
-                        f"de hace {age_hours:.1f} horas."
+                        f"de hace {_fmt_num_es(age_hours, 1)} horas."
                     )
                 except Exception:
                     annual = {}
@@ -2606,7 +2606,7 @@ def lpf_tables_with_fallback(liga="arg.1", timeout=30):
     if snap_zones:
         warnings.append(
             "No pude consultar las fuentes ahora. Uso la última foto válida "
-            f"({snap_source}), guardada hace {age_hours:.1f} horas."
+            f"({snap_source}), guardada hace {_fmt_num_es(age_hours, 1)} horas."
         )
         return (
             snap_zones,
@@ -3117,9 +3117,9 @@ def promedio_que_necesita_texto(e, base, rest, prev, k=1, pend=None):
     )
     L = [
         f"**¿{e} y el descenso por promedios?** (descienden los {k} peores)",
-        f"Está {pos}º de {n} con promedio **{d['hoy']:.3f}** "
+        f"Está {pos}º de {n} con promedio **{_fmt_num_es(d['hoy'], 3)}** "
         f"({d['tp']} pts en {d['tj']} PJ, contando temporadas previas). "
-        f"Perdiendo todo baja a **{d['piso']:.3f}**; ganando todo sube a **{d['techo']:.3f}**.",
+        f"Perdiendo todo baja a **{_fmt_num_es(d['piso'], 3)}**; ganando todo sube a **{_fmt_num_es(d['techo'], 3)}**.",
     ]
 
     if len(abajo_seguro) >= k:
@@ -3130,7 +3130,7 @@ def promedio_que_necesita_texto(e, base, rest, prev, k=1, pend=None):
         )
     elif len(arriba_seguro) >= n - k:
         L.append(
-            f"❌ **Condenado por promedio:** aun ganando todo llega a {d['techo']:.3f} y ya hay "
+            f"❌ **Condenado por promedio:** aun ganando todo llega a {_fmt_num_es(d['techo'], 3)} y ya hay "
             f"{len(arriba_seguro)} equipos cuyos pisos quedan por encima de ese número."
         )
     else:
@@ -3162,13 +3162,13 @@ def promedio_que_necesita_texto(e, base, rest, prev, k=1, pend=None):
             if pts_need == 0:
                 L.append(
                     "✅ **Garantía colectiva:** aun sin sumar más puntos, los cruces pendientes impiden que "
-                    f"todos los rivales necesarios lo alcancen. Su piso final es {final_avg:.3f}."
+                    f"todos los rivales necesarios lo alcancen. Su piso final es {_fmt_num_es(final_avg, 3)}."
                 )
             else:
                 L.append(
                     f"Para salvarse **sin depender de nadie**, la garantía conservadora exige sumar "
                     f"**{_texto_cantidad(pts_need, 'punto')}** de los {max_points} en juego y terminar con "
-                    f"un promedio de al menos **{final_avg:.3f}**."
+                    f"un promedio de al menos **{_fmt_num_es(final_avg, 3)}**."
                 )
             L.append(
                 "La cuenta evalúa los cocientes finales con sus denominadores reales y descuenta los "
@@ -3203,7 +3203,7 @@ def promedio_que_necesita_texto(e, base, rest, prev, k=1, pend=None):
                 condicionados.append((rival, condicionado, general))
             condicionados.sort(key=lambda item: (-item[1], item[0]))
             muestra = " · ".join(
-                f"{rival}: {cond:.3f} condicionado (techo general {general:.3f})"
+                f"{rival}: {_fmt_num_es(cond, 3)} condicionado (techo general {_fmt_num_es(general, 3)})"
                 for rival, cond, general in condicionados[:6]
             )
             if len(condicionados) > 6:
@@ -3264,18 +3264,10 @@ def lpf_playoffs_texto(equipo, Z, rest, pend=None):
     elif estado == "out":
         titular = f"{equipo} quedó sin chances de clasificar a los octavos."
     else:
-        projection = (contexto or {}).get("projection") or {}
-        target = projection.get("target_70") or projection.get("target_50")
         titular = (
             f"{equipo} sigue en carrera. La exigencia depende de la tabla actual, del fixture pendiente y de los "
             "cruces entre los equipos que pelean por entrar a los octavos."
         )
-        if target is not None:
-            target = int(target)
-            titular += (
-                f" La referencia del modelo está alrededor de **{target} puntos totales**: necesita sumar "
-                f"**{max(0, target - mio)}** para llegar."
-            )
     L = [
         f"## {equipo} · Playoffs — Zona {lab}",
         f"**{titular}**",
@@ -3294,9 +3286,9 @@ def lpf_playoffs_texto(equipo, Z, rest, pend=None):
     L.append("### Cómo leer estos números")
     L.append(
         "El informe separa el **corte actual**, la **proyección del modelo**, la **referencia histórica** y la "
-        "**garantía matemática**. La proyección y el antecedente describen una exigencia probable; sólo una "
-        "garantía exacta permite afirmar que clasifica pase lo que pase. Cuando se muestra una línea conservadora, "
-        "puede estar pidiendo algún punto de más."
+        "**garantía matemática**. La proyección y el antecedente describen una exigencia probable. Tanto una "
+        "garantía exacta como una línea conservadora permiten afirmar que el equipo clasifica si alcanza esa marca; "
+        "la diferencia es que la línea conservadora puede exigir más puntos de los realmente necesarios."
     )
     L.append(
         "_Art. 14.1.2: si un club termina en zona de descenso o debe jugar un desempate por el descenso, no puede "
@@ -3649,6 +3641,14 @@ def _fmt_num_es(value, decimals=1):
     return f"{number:.{decimals}f}".replace(".", ",")
 
 
+def _fmt_entero_es(value):
+    """Miles con punto, como se muestran habitualmente en Argentina."""
+    try:
+        return f"{int(value):,}".replace(",", ".")
+    except (TypeError, ValueError):
+        return "0"
+
+
 def _armar_contexto_competitivo(equipo, base, pend, k, objetivo, strength_base=None):
     """Construye la capa viva de tabla + fixture y la referencia histórica.
 
@@ -3736,21 +3736,40 @@ def _contexto_competitivo_bloque(equipo, nombre_obj, objetivo, contexto, histori
         rows = _filas_probabilidad_cercanas(projection, target_editorial)
         if rows:
             detalle = " · ".join(
-                f"{int(row['final_points'])} puntos: {round(100 * float(row['probability']))}%"
+                f"{int(row['final_points'])} puntos: {round(100 * float(row['probability']))}% "
+                f"(sobre {_fmt_entero_es(row.get('samples', 0))} simulaciones)"
                 for row in rows
             )
             L.append(
                 f"**Escalera estimada por puntaje final:** {detalle}. En cada caso, el porcentaje indica en qué "
-                f"proporción de las **{int(projection.get('simulations', 0)):,} simulaciones** {equipo} {alcance}. "
+                f"proporción de las simulaciones en las que {equipo} terminó con ese total {alcance}. El modelo "
+                f"corrió **{_fmt_entero_es(projection.get('simulations', 0))} escenarios** en total. "
                 "Son frecuencias del modelo, no probabilidades de apuestas ni pronósticos exactos."
             )
         if target85 is not None and int(target85) != target_editorial:
+            target85_row = next(
+                (row for row in (projection.get("by_final_points") or [])
+                 if int(row.get("final_points", -1)) == int(target85)),
+                None,
+            )
+            target85_pct = (
+                round(100 * float(target85_row.get("probability", 0)))
+                if target85_row else 85
+            )
+            target85_samples = int(target85_row.get("samples", 0)) if target85_row else 0
+            sample_note = f" sobre {_fmt_entero_es(target85_samples)} simulaciones" if target85_samples else ""
             L.append(
-                f"A partir de **{int(target85)} puntos totales**, la clasificación aparece en al menos el 85% de "
-                "los escenarios simulados; sigue sin ser una garantía matemática."
+                f"Con **{int(target85)} puntos totales**, {equipo} {alcance} en el **{target85_pct}%** de las "
+                f"simulaciones en las que terminó con ese puntaje{sample_note}. Es una frecuencia muy alta dentro "
+                "del modelo, pero todavía no constituye una garantía matemática."
             )
         if projection.get("model_note") and objetivo != "sudamericana":
-            L.append(f"_Cómo se estima: {projection['model_note']}_")
+            L.append(
+                "**Cómo se estima.** El modelo pondera el rendimiento actual, ajustado por la cantidad de partidos "
+                "jugados; incorpora una ventaja moderada para el local y utiliza un 27% de probabilidad de empate. "
+                "La diferencia de gol actual se usa como referencia para los posibles desempates, pero no se "
+                "inventa una diferencia futura exacta."
+            )
 
     if historial:
         if objetivo == "playoffs":
@@ -3786,29 +3805,30 @@ def _contexto_competitivo_bloque(equipo, nombre_obj, objetivo, contexto, histori
             "El motor lo registra como un único partido: no agrega seis puntos ficticios."
         )
     if mostrar_cruces and internos:
-        sobreconteo = int(contexto.get("independent_ceiling_overcount", 0))
         L.append(
-            f"Entre los demás competidores quedan **{internos} enfrentamientos internos**. Si se sumaran sus máximos "
-            f"individuales, esos partidos serían contados como si entregaran seis puntos. Como cada encuentro reparte "
-            f"como máximo tres, se produciría un **sobreconteo de {sobreconteo} puntos**. La simulación evita ese error "
-            "al resolver cada partido una sola vez."
+            f"Entre los demás competidores quedan **{internos} enfrentamientos internos**. Por eso no se pueden "
+            "sumar sus máximos individuales como si todos pudieran ganar todos sus partidos: la simulación resuelve "
+            "cada encuentro una sola vez y evita contar puntos incompatibles."
         )
     rivales = contexto.get("rivals") or []
     if mostrar_rivales and rivales:
-        detalle = " · ".join(
-            f"{row['team']}: {row['points']} pts · {row.get('played', 0)} PJ · "
-            f"{row['games_left']} por jugar · máximo {row['ceiling']}"
-            + (f"; máximo {row['ceiling_if_target_wins']} si pierde con {equipo}" if row.get("direct_matches") else "")
-            for row in rivales[:6]
-        )
         etiqueta_rivales = "Competidores próximos a la línea" if mostrar_cruces else f"Competidores próximos al corte de {nombre_obj}"
-        L.append(f"**{etiqueta_rivales}:** {detalle}.")
+        L.append(f"**{etiqueta_rivales}:**")
+        for row in rivales[:6]:
+            detalle = (
+                f"- **{row['team']}:** {row['points']} puntos · {row.get('played', 0)} PJ · "
+                f"{row['games_left']} por jugar · máximo {row['ceiling']}"
+            )
+            if row.get("direct_matches"):
+                detalle += f"; máximo {row['ceiling_if_target_wins']} si pierde con {equipo}"
+            L.append(detalle + ".")
     return L
 
 def _copas_bloque_objetivo(equipo, base_red, rest, pend, k, nombre_obj, modo="entrar",
                             cupos_reales=None, nota_desempate="", contexto=None,
                             historial=None, objetivo=None, mostrar_cruces=True,
-                            mostrar_rivales=True):
+                            mostrar_rivales=True, mostrar_amenazas=True,
+                            meta_override=None):
     """Explica proyección, caminos y garantía sin confundirlos."""
     salva = modo == "salvarse"
     verbo = "se salva" if salva else "entra"
@@ -3841,8 +3861,12 @@ def _copas_bloque_objetivo(equipo, base_red, rest, pend, k, nombre_obj, modo="en
             f"La cuenta: {mio} puntos + {gx} partidos × 3 = **{techo} como máximo**, y no alcanza.",
         ]
 
-    linea = _linea_garantia(base_red, rest, pend, equipo, k)
-    meta = linea + 1
+    if meta_override is None:
+        linea = _linea_garantia(base_red, rest, pend, equipo, k)
+        meta = linea + 1
+    else:
+        meta = int(meta_override)
+        linea = meta - 1
     ladder = None
     guarantee_exact = False
     if pend and gx <= 6:
@@ -3888,23 +3912,27 @@ def _copas_bloque_objetivo(equipo, base_red, rest, pend, k, nombre_obj, modo="en
         key=lambda kv: (-kv[1], -pts[kv[0]], kv[0]),
     )
 
+    objetivo_titulo = {
+        "Octavos": "los octavos",
+        "Libertadores": "la Libertadores",
+        "Sudamericana": "al menos la Sudamericana",
+    }.get(nombre_obj, nombre_obj)
+
     if faltan > 3 * gx:
+        L.append(f"### 🔒 ¿Ganando todo asegura {objetivo_titulo}?")
         if max_fail_exact is True:
-            L.append(f"### 🔒 {nombre_obj}: ni ganando todo queda asegurado")
             L.append(
                 f"El motor exacto comprobó que, aun si {equipo} gana sus {gx} partidos y termina con "
                 f"**{techo} puntos**, existe al menos una combinación compatible de resultados que puede dejarlo "
                 f"afuera. Por eso no depende exclusivamente de sí mismo."
             )
         elif max_fail_exact is False:
-            L.append(f"### 🔒 {nombre_obj}: ganar todo sí lo asegura")
             L.append(
                 f"Aunque la línea conservadora aparece en {meta}, el chequeo exacto del escenario máximo comprobó "
                 f"que con **{techo} puntos** no existe una combinación que deje a {equipo} afuera. La línea "
                 "conservadora estaba pidiendo puntos de más."
             )
         else:
-            L.append(f"### 🔒 {nombre_obj}: la garantía todavía no queda certificada")
             L.append(
                 f"{equipo} puede llegar como máximo a **{techo} puntos**. La línea conservadora está en **{meta}**, "
                 "pero ese número puede pedir puntos de más. Por eso, con este cálculo no corresponde afirmar que "
@@ -3912,7 +3940,7 @@ def _copas_bloque_objetivo(equipo, base_red, rest, pend, k, nombre_obj, modo="en
                 f"lo deje afuera con {techo}."
             )
 
-        if amenazas_techo:
+        if mostrar_amenazas and amenazas_techo:
             ceden = max(0, len(amenazas_techo) - (k - 1))
             muestra = amenazas_techo[:12]
             lst = " · ".join(
@@ -3944,8 +3972,12 @@ def _copas_bloque_objetivo(equipo, base_red, rest, pend, k, nombre_obj, modo="en
             if nota_desempate:
                 L.append(nota_desempate)
     else:
-        titulo = "Garantía matemática exacta" if guarantee_exact else "Línea de garantía conservadora"
-        L.append(f"### 🔒 {titulo} de {nombre_obj}")
+        titulo = (
+            f"Garantía matemática exacta para {objetivo_titulo}"
+            if guarantee_exact else
+            f"Línea conservadora para asegurar {objetivo_titulo}"
+        )
+        L.append(f"### 🔒 {titulo}")
         if meta_alcanzable is not None and meta_alcanzable != meta:
             L.append(
                 f"La línea calculada está en **{meta} puntos**. Como {equipo} no puede terminar exactamente con "
@@ -3967,7 +3999,7 @@ def _copas_bloque_objetivo(equipo, base_red, rest, pend, k, nombre_obj, modo="en
             )
         else:
             L.append(
-                f"Alcanzar {meta_segura} asegura el objetivo según la línea conservadora. Puede entrar con menos, "
+                f"Alcanzar {meta_segura} asegura el objetivo según la línea conservadora. Puede {infinitivo} con menos, "
                 "porque este método está diseñado para no prometer una clasificación falsa y puede exigir algún "
                 "punto adicional."
             )
@@ -3978,14 +4010,10 @@ def _copas_bloque_objetivo(equipo, base_red, rest, pend, k, nombre_obj, modo="en
             f"que desde **{meta} puntos** no existe ninguna combinación que deje a {equipo} afuera."
         )
     elif meta <= techo:
-        extra = ""
-        if meta_alcanzable is not None and meta_alcanzable != meta:
-            extra = f" El primer total alcanzable que la supera es {meta_alcanzable}."
         L.append(
-            f"**Cómo se obtuvo:** es una **línea conservadora**. Descuenta los cruces entre rivales para evitar "
-            f"máximos incompatibles, pero todavía puede pedir puntos de más. Alcanzar o superar {meta} asegura el "
-            f"objetivo.{extra} El mínimo exacto puede ser menor y se calcula en el Radar cuando quedan seis fechas "
-            "o menos."
+            "**Qué significa esta línea.** El cálculo descuenta los cruces entre rivales para evitar máximos "
+            "incompatibles, pero todavía puede pedir puntos de más. El mínimo exacto puede ser menor y se "
+            "calcula en el Radar cuando quedan seis fechas o menos."
         )
     elif max_fail_exact is None:
         L.append(
@@ -4013,6 +4041,73 @@ def _copas_bloque_objetivo(equipo, base_red, rest, pend, k, nombre_obj, modo="en
     # contexto competitivo. No se repiten acá.
     return L
 
+
+def _escenario_maximo_copas_bloque(equipo, base_red, rest, pend, k_lib, k_sud, meta_lib, meta_sud):
+    """Explica una sola vez qué pasa si el equipo gana todos sus partidos.
+
+    Los máximos de los rivales se condicionan a las derrotas obligatorias ante el
+    equipo consultado. La lista es común a Libertadores y Sudamericana; después se
+    explican por separado las exigencias de cada frontera.
+    """
+    if not pend or equipo not in base_red:
+        return []
+    pts = {name: int(row.get("pts", 0)) for name, row in base_red.items()}
+    gx = int(rest.get(equipo, 0))
+    techo = pts[equipo] + 3 * gx
+    if meta_lib <= techo and meta_sud <= techo:
+        return []
+
+    cruces = {}
+    for local, visitante in pend:
+        if equipo not in (local, visitante):
+            continue
+        rival = visitante if local == equipo else local
+        if rival in base_red and rival != equipo:
+            cruces[rival] = cruces.get(rival, 0) + 1
+
+    amenazas = []
+    for rival in base_red:
+        if rival == equipo:
+            continue
+        maximo = pts[rival] + 3 * max(0, int(rest.get(rival, 0)) - cruces.get(rival, 0))
+        if maximo >= techo:
+            amenazas.append((rival, maximo))
+    amenazas.sort(key=lambda item: (-item[1], -pts[item[0]], item[0]))
+    if not amenazas:
+        return []
+
+    partidos = "partido" if gx == 1 else "partidos"
+    L = [f"### Si {equipo} gana los {gx} {partidos}"]
+    L.append(
+        f"Terminaría con **{techo} puntos**. Aun descontando las derrotas obligatorias de sus rivales directos, "
+        f"**{len(amenazas)} equipos** conservan un máximo individual de {techo} o más. Esos máximos no pueden "
+        "alcanzarse todos al mismo tiempo porque varios de esos clubes todavía deben enfrentarse entre sí."
+    )
+    L.append("**Rivales que todavía pueden alcanzar ese total:**")
+    for rival, maximo in amenazas:
+        L.append(
+            f"- **{rival}:** {pts[rival]} puntos · {base_red[rival].get('pj', 0)} PJ · "
+            f"{rest.get(rival, 0)} por jugar · máximo condicionado {maximo}."
+        )
+
+    deben_ceder_lib = max(0, len(amenazas) - (k_lib - 1))
+    deben_ceder_sud = max(0, len(amenazas) - (k_sud - 1))
+    L.append(
+        f"**Para la Libertadores:** como entran los {k_lib} primeros elegibles, al menos "
+        f"**{deben_ceder_lib} de esos {len(amenazas)} equipos** deben terminar detrás de {equipo}, ya sea por "
+        "puntos o por los criterios de desempate."
+    )
+    L.append(
+        f"**Para obtener al menos Sudamericana:** con la configuración actual, la última plaza queda en el "
+        f"{k_sud}º puesto elegible. Por eso, al menos **{deben_ceder_sud} de esos {len(amenazas)} equipos** deben "
+        f"terminar detrás de {equipo}."
+    )
+    L.append(
+        "Si dos o más equipos terminan igualados en puntos, la Tabla General se ordena por diferencia de gol, "
+        "goles a favor, Fair Play y, si persiste la igualdad, sorteo."
+    )
+    return L
+
 def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""), extras=("", ""), pend=None):
     """Informe de copas por la Tabla General: conclusión arriba, cada número con su
     porqué al lado, los rivales una sola vez y la letra chica al final."""
@@ -4028,6 +4123,11 @@ def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""),
     base_red = {e: anual[e] for e in red}
     n = len(base_red)
     pos_red = red.index(equipo) + 1
+    anual_df = liga_tabla_df(anual)
+    pos_general = next(
+        (int(index) + 1 for index, value in enumerate(anual_df["Equipo"].tolist()) if value == equipo),
+        pos_red,
+    )
     k_lib = n_t
     k_sud = min(n, n_t + 6)
     e_lib = _liga_in_out(equipo, base_red, rest, k_lib)
@@ -4045,6 +4145,7 @@ def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""),
     target_lib = projection_lib.get("target_70") or projection_lib.get("target_50")
     target_sud = projection_sud.get("target_70") or projection_sud.get("target_50")
     pj_e = int(base_red[equipo].get("pj", 0))
+    referencias = []
 
     if e_lib == "in":
         titular = f"Por la Tabla General, {equipo} ya tiene la Libertadores asegurada."
@@ -4057,7 +4158,6 @@ def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""),
             f"{equipo} sigue en carrera por las copas de 2027. La Libertadores exige una remontada mayor; la "
             "Sudamericana aparece como el objetivo más cercano según la tabla y el fixture actuales."
         )
-        referencias = []
         if target_lib is not None:
             referencias.append(
                 f"Libertadores: alrededor de {int(target_lib)} puntos totales "
@@ -4068,31 +4168,58 @@ def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""),
                 f"al menos Sudamericana: alrededor de {int(target_sud)} puntos totales "
                 f"(+{max(0, int(target_sud) - pts_e)} desde hoy)"
             )
-        if referencias:
-            titular += " Referencias del modelo: " + "; ".join(referencias) + "."
+    posicion_actual = f"Hoy está **{pos_red}º entre los equipos elegibles**"
+    if pos_general != pos_red:
+        posicion_actual += f" y **{pos_general}º en la Tabla General**"
+    posicion_actual += (
+        f", con **{pts_e} puntos en {pj_e} PJ**. Le quedan **{gx} partidos** y "
+        f"**{3 * gx} puntos** disponibles."
+    )
     L = [
         f"## {equipo} · Copas 2027",
         f"**{titular}**",
-        f"Hoy está **{pos_red}º entre los equipos elegibles**, con **{pts_e} puntos en {pj_e} PJ**. Le quedan "
-        f"**{gx} partidos** y **{3 * gx} puntos** disponibles.",
+        posicion_actual,
         "Este informe calcula la vía de la **Tabla General**. La simulación usa la configuración actual de equipos "
         "elegibles y **no asigna probabilidades a los campeones todavía pendientes**. Esos títulos se explican "
         "después como escenarios separados.",
     ]
+    if referencias:
+        L.append("**Referencias del modelo:**")
+        for referencia in referencias:
+            L.append(f"- {referencia}.")
+        if target_lib is not None:
+            faltan_lib = max(0, int(target_lib) - pts_e)
+            ejemplo_lib = _texto_combos(faltan_lib, gx)
+            if ejemplo_lib:
+                L.append("**Ejemplos de caminos hacia la referencia de Libertadores:** " + ejemplo_lib.replace("**Cómo llegar** (sirve alcanzar la meta *o superarla*): ", ""))
+        if target_sud is not None:
+            faltan_sud = max(0, int(target_sud) - pts_e)
+            ejemplo_sud = _texto_combos(faltan_sud, gx)
+            if ejemplo_sud:
+                L.append("**Ejemplos de caminos hacia la referencia de Sudamericana:** " + ejemplo_sud.replace("**Cómo llegar** (sirve alcanzar la meta *o superarla*): ", ""))
+        L.append("Son ejemplos de combinaciones posibles, no los únicos caminos.")
 
     # ── Cada objetivo, por separado ──
     _nota_desempate_anual = ("Si dos o más equipos terminan igualados en puntos, la Tabla General se ordena por "
                              "diferencia de gol, goles a favor, Fair Play y, si persiste la igualdad, sorteo.")
+    meta_lib_pre = _linea_garantia(base_red, rest, pend, equipo, k_lib) + 1
+    meta_sud_pre = _linea_garantia(base_red, rest, pend, equipo, k_sud) + 1
     L += _copas_bloque_objetivo(
         equipo, base_red, rest, pend, k_lib, "Libertadores",
         cupos_reales=k_lib, nota_desempate=_nota_desempate_anual,
         contexto=contexto_lib, historial=historial_lib, objetivo="libertadores",
+        mostrar_amenazas=False, meta_override=meta_lib_pre,
     )
     L += _copas_bloque_objetivo(
         equipo, base_red, rest, pend, k_sud, "Sudamericana",
         cupos_reales=6, nota_desempate=_nota_desempate_anual,
         contexto=contexto_sud, historial=historial_sud, objetivo="sudamericana",
-        mostrar_cruces=False, mostrar_rivales=True,
+        mostrar_cruces=False, mostrar_rivales=True, mostrar_amenazas=False,
+        meta_override=meta_sud_pre,
+    )
+
+    L += _escenario_maximo_copas_bloque(
+        equipo, base_red, rest, pend, k_lib, k_sud, meta_lib_pre, meta_sud_pre,
     )
 
     # ── Rivales que le quedan: UNA sola vez ──
@@ -4110,7 +4237,7 @@ def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""),
         _lib_espera = red[n_t]
         _via_cl = [x for x in _lib_hoy if x in _clausura_vivos]
         _via_ca = [x for x in _lib_hoy if x in _copa_vivos]
-        L.append("### La línea de Libertadores todavía puede correrse")
+        L.append("### Cómo pueden mover los cupos los campeones")
         _cond = []
         if _via_cl:
             _cond.append(f"uno de los actuales cupos por tabla gana el Clausura ({', '.join(_via_cl)})")
@@ -4159,11 +4286,16 @@ def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""),
                          "Por eso, los siguientes equipos elegibles suben en el orden.")
     chica.append(
         "El informe separa el **corte actual**, la **proyección del modelo**, la **referencia histórica** y la "
-        "**garantía matemática**. Sólo una garantía exacta permite afirmar que entra pase lo que pase. Una línea "
-        "conservadora puede pedir algún punto de más."
+        "**garantía matemática**. Tanto una garantía exacta como una línea conservadora permiten afirmar que el "
+        "equipo entra si alcanza esa marca; la diferencia es que la línea conservadora puede exigir más puntos de "
+        "los realmente necesarios."
     )
     if P["avisos"]:
-        chica.append("Pendiente: " + " ".join(P["avisos"]))
+        chica.append(
+            "**Definiciones pendientes.** " + " ".join(P["avisos"]) + " La simulación no asigna probabilidades "
+            "a esos campeones: los presenta como escenarios separados porque pueden modificar el orden de los "
+            "equipos elegibles."
+        )
     L += chica
     return editorialize_text("\n\n".join(L))
 
@@ -4709,7 +4841,7 @@ def parse_promedios_tabla(texto, pj_actual=None):
         # Control de la media publicada, con tolerancia por redondeo.
         source_avg = f["pts"] / f["pj"] if f["pj"] else 0.0
         if abs(source_avg - f["prom"]) > 0.006:
-            avisos.append(f"{team}: el promedio publicado ({f['prom']:.3f}) no coincide con Pts/PJ ({source_avg:.3f}).")
+            avisos.append(f"{team}: el promedio publicado ({_fmt_num_es(f['prom'], 3)}) no coincide con Pts/PJ ({_fmt_num_es(source_avg, 3)}).")
         previas[team] = (previous_pts, previous_pj)
 
     if mismatches:
@@ -5778,7 +5910,7 @@ def cargar_estado(equipos, jugados, pendientes):
         st.session_state.ESTADO = dict(equipos=equipos, jugados=jugados, pendientes=pendientes,
                                        esc=None, mg=mg, solo_puntos=True)
         return
-    with st.spinner(f"Calculando {total:,} escenarios…"):
+    with st.spinner(f"Calculando {_fmt_entero_es(total)} escenarios…"):
         esc = todos_los_escenarios(equipos, jugados, pendientes, mg)
     st.session_state.ESTADO = dict(equipos=equipos, jugados=jugados, pendientes=pendientes,
                                    esc=esc, mg=mg, solo_puntos=False)
@@ -6688,7 +6820,7 @@ with st.sidebar:
             ui_success(f"Liga cargada · {len(E['equipos'])} equipos · modo por puntos")
             ui_caption(f"Pendientes: {len(E['pendientes'])} — son demasiados para enumerar marcador por marcador, así que voy por puntos.")
         else:
-            ui_success(f"Grupo cargado · {len(E['equipos'])} equipos · {len(E['esc']):,} escenarios")
+            ui_success(f"Grupo cargado · {len(E['equipos'])} equipos · {_fmt_entero_es(len(E['esc']))} escenarios")
             ui_caption(f"Máx goles/equipo: {E['mg']} · Pendientes: {len(E['pendientes'])}")
 
 # ─── MAIN TABS ───────────────────────────────────────────────────────────────────
@@ -6870,7 +7002,7 @@ def _chat_catalog(E, team, other):
                 ("Previa del equipo", "Partido, rango de puestos e impacto en playoffs, copas o descenso.", f"Previa de {team}"),
                 ("Qué necesita", "Piso, techo, cruces directos y caminos para alcanzar el objetivo.", f"¿Qué necesita {team} para los playoffs?"),
                 ("Qué le conviene", "Resultados de otras canchas que mejoran su escenario.", f"¿Qué le conviene a {team} para los playoffs?"),
-                ("Tabla de las zonas", "Posiciones actuales y línea del top 8.", "Tabla de las dos zonas"),
+                ("Tabla de las zonas", "Posiciones actuales y línea de clasificación.", "Tabla de las dos zonas"),
                 ("Libertadores", "Panorama general de los cupos por la Tabla Anual.", "¿Cómo está la clasificación a la Libertadores?"),
                 ("Sudamericana", "Panorama general de los cupos por la Tabla Anual.", "¿Cómo está la clasificación a la Sudamericana?"),
                 ("Descenso", "Impacto combinado de la anual y los promedios.", "¿Cómo está el descenso?"),
@@ -6878,7 +7010,7 @@ def _chat_catalog(E, team, other):
             ],
             "🏆 Playoffs": [
                 ("Qué necesita para entrar", "Cuenta exacta para terminar entre los ocho.", f"¿Qué necesita {team} para los playoffs?"),
-                ("Chances de playoffs", "Probabilidad estimada de entrar al top 8.", f"Chances de {team} para los playoffs"),
+                ("Chances de playoffs", "Probabilidad estimada de entrar entre los ocho primeros.", f"Chances de {team} para los playoffs"),
                 ("Depende de sí mismo", "Distingue garantía propia de resultados ajenos.", f"¿{team} depende de sí mismo para los playoffs?"),
                 ("Qué resultados le sirven", "La otra cancha y los cruces que más lo favorecen.", f"¿Qué le conviene a {team} para los playoffs?"),
                 ("Cómo puede terminar la fecha", "Mejor y peor posición posible en la próxima ventana.", f"¿Cómo puede terminar la fecha {team}?"),
@@ -6886,7 +7018,7 @@ def _chat_catalog(E, team, other):
                 ("Cruces de octavos", "Llaves si el torneo terminara hoy.", "Cruces de octavos"),
                 ("Proyección de puntos", "Puntaje final si cada equipo mantiene su ritmo.", "Proyección de puntos"),
                 ("Puntos máximos", "Techo matemático de los equipos de cada zona.", "Puntos máximos"),
-                ("Relato de la zona", "Texto breve y publicable sobre la pelea por el top 8.", f"Relato de la zona de {team}"),
+                ("Relato de la zona", "Texto breve y publicable sobre la pelea por los playoffs.", f"Relato de la zona de {team}"),
             ],
             "🌎 Copas": [
                 ("Panorama de Libertadores", "Clasificados actuales, corte y cupos que pueden liberarse.", "¿Cómo está la clasificación a la Libertadores?"),
@@ -6942,7 +7074,7 @@ def _chat_catalog(E, team, other):
                 ("Relato de su zona", "Resumen periodístico de la pelea en la zona donde juega.", f"Contame el escenario de {team}"),
             ],
             "📊 Tablas y visuales": [
-                ("Tabla de las zonas", "Vista completa con la línea del top 8.", "Tabla de las dos zonas"),
+                ("Tabla de las zonas", "Vista completa con la línea de clasificación.", "Tabla de las dos zonas"),
                 ("Tabla Anual", "Acumulada para copas y descenso.", "Tabla Anual"),
                 ("Promedios", "Coeficientes con piso y techo.", "Promedios"),
                 ("Proyección", "Puntos finales al ritmo actual.", "Proyección"),
@@ -7385,10 +7517,10 @@ def lpf_otros_resultados_sim(equipo, Z, rest, pend, top=_LPF_TOP_OCTAVOS, jugado
         rows.append({
             "Partido": f"{local} – {visitor}",
             "Mejor para River" if equipo == "River Plate" else "Mejor resultado": recommendation,
-            "Gana local": f"{opts['L']:.1f}%",
-            "Empate": f"{opts['E']:.1f}%",
-            "Gana visitante": f"{opts['V']:.1f}%",
-            "Diferencia": f"{impact:.2f} pp",
+            "Gana local": f"{_fmt_num_es(opts['L'], 1)}%",
+            "Empate": f"{_fmt_num_es(opts['E'], 1)}%",
+            "Gana visitante": f"{_fmt_num_es(opts['V'], 1)}%",
+            "Diferencia": f"{_fmt_num_es(impact, 2)} pp",
             "Relevancia": relevance,
             "_impact": impact,
         })
@@ -7397,7 +7529,7 @@ def lpf_otros_resultados_sim(equipo, Z, rest, pend, top=_LPF_TOP_OCTAVOS, jugado
     scope = f"Fecha {prox}" + (f" + {len(atrasados)} postergado(s)" if atrasados else "")
     text = [f"## La otra cancha para {equipo} · {scope}",
             f"**Objetivo:** entrar a los playoffs de la Zona {lab}.  "
-            f"**Probabilidad base estimada:** {base_ch:.1f}%."]
+            f"**Probabilidad base estimada:** {_fmt_num_es(base_ch, 1)}%."]
     if significant:
         top_row = significant[0]
         best_col = "Mejor para River" if equipo == "River Plate" else "Mejor resultado"
@@ -7408,11 +7540,11 @@ def lpf_otros_resultados_sim(equipo, Z, rest, pend, top=_LPF_TOP_OCTAVOS, jugado
                     "pero no debe presentarse como condición indispensable.")
     else:
         text.append("**No hay una otra cancha decisiva en esta ventana.** Ninguno de los resultados ajenos "
-                    f"supera el umbral de ruido del modelo (**{noise:.2f} puntos porcentuales**). "
+                    f"supera el umbral de ruido del modelo (**{_fmt_num_es(noise, 2)} puntos porcentuales**). "
                     "El resultado propio pesa bastante más.")
         text.append("En lugar de decir que todos los partidos ‘dan igual’, el detalle muestra las diferencias "
                     "mínimas para auditoría, pero las rotula como no apreciables.")
-    text.append(f"_ESTIMADO · {n:,} simulaciones, semilla {seed}. Las columnas comparan la chance de playoffs "
+    text.append(f"_ESTIMADO · {_fmt_entero_es(n)} simulaciones, semilla {seed}. Las columnas comparan la chance de playoffs "
                 "fijando por separado victoria local, empate y victoria visitante. No es una garantía matemática._")
     visible = [{k: v for k, v in row.items() if k != "_impact"} for row in rows]
     # Si nada es significativo, alcanza con los cinco partidos que más se acercan al umbral.
@@ -7549,7 +7681,7 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None, scop
             "Puntos al cierre": points,
             "Mejor puesto": _ord(scenario["best_rank"]) if scenario["best_rank"] else "—",
             "Peor puesto": _ord(scenario["worst_rank"]) if scenario["worst_rank"] else "—",
-            "Lectura": ("Puede quedar dentro del top 8" if scenario["can_enter"] else "No puede entrar al top 8")
+            "Lectura": ("Puede quedar entre los ocho primeros" if scenario["can_enter"] else "No puede entrar entre los ocho primeros")
                        + (" y también afuera" if scenario["can_enter"] and scenario["can_fail"] else
                           "; no puede salir" if scenario["can_enter"] and not scenario["can_fail"] else ""),
         })
@@ -7580,7 +7712,7 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None, scop
         lines.append(f"**Si gana**, puede terminar entre **{_ord(win['best_rank'])} y {_ord(win['worst_rank'])}** "
                      "en la Zona. El triunfo no necesariamente lo deja adentro: el extremo depende de las otras canchas y de los desempates.")
     else:
-        lines.append(f"**Si gana**, su mejor ubicación es {_ord(win['best_rank'])}; todavía no puede entrar al top 8.")
+        lines.append(f"**Si gana**, su mejor ubicación es {_ord(win['best_rank'])}; todavía no puede entrar entre los ocho primeros.")
     lines.append(f"**Si empata**, queda entre {_ord(draw['best_rank'])} y {_ord(draw['worst_rank'])}. "
                  f"**Si pierde**, entre {_ord(loss['best_rank'])} y {_ord(loss['worst_rank'])}.")
     lines.append("_EXACTO POR PUNTOS · Cada partido tiene una sola salida posible: victoria local, empate o victoria visitante. "
@@ -7803,8 +7935,8 @@ def lpf_conviene_obj(equipo, objetivo, ctx, pend, jugados, n=20000, seed=29, fec
         return {
             "Partido": f"{local} – {visitor}",
             "Mejor resultado": recommendation,
-            "Gana local": f"{opts['L']:.1f}%", "Empate": f"{opts['E']:.1f}%",
-            "Gana visitante": f"{opts['V']:.1f}%", "Diferencia": f"{impact:.2f} pp",
+            "Gana local": f"{_fmt_num_es(opts['L'], 1)}%", "Empate": f"{_fmt_num_es(opts['E'], 1)}%",
+            "Gana visitante": f"{_fmt_num_es(opts['V'], 1)}%", "Diferencia": f"{_fmt_num_es(impact, 2)} pp",
             "Relevancia": relevance, "_impact": impact,
         }
 
@@ -7837,7 +7969,7 @@ def lpf_conviene_obj(equipo, objetivo, ctx, pend, jugados, n=20000, seed=29, fec
     objective_name = "salvarse del descenso" if saving else f"entrar a {_OBJ_NOMBRE[objetivo]}"
     scope = f"Fecha {prox}" + (f" + {len(postponed)} postergado(s)" if postponed else "")
     text = [f"## La otra cancha para {equipo} · {objective_name}",
-            f"**Ventana:** {scope}. **Probabilidad base estimada:** {baseline:.1f}%."]
+            f"**Ventana:** {scope}. **Probabilidad base estimada:** {_fmt_num_es(baseline, 1)}%."]
     if significant:
         top = significant[0]
         text.append(f"El partido de mayor impacto es **{top['Partido']}**: el mejor resultado es "
@@ -7847,7 +7979,7 @@ def lpf_conviene_obj(equipo, objetivo, ctx, pend, jugados, n=20000, seed=29, fec
                     "más altos, pero no corresponde transformarlos en una recomendación categórica.")
     if df_cross is not None:
         text.append("También se muestran los cruces futuros entre competidores directos que sí superan el umbral de ruido.")
-    text.append(f"_ESTIMADO · {n:,} simulaciones, semilla {seed}, umbral de diferencia apreciable {noise:.2f} pp. "
+    text.append(f"_ESTIMADO · {_fmt_entero_es(n)} simulaciones, semilla {seed}, umbral de diferencia apreciable {_fmt_num_es(noise, 2)} pp. "
                 "Las probabilidades no alimentan las garantías matemáticas._")
     return "\n\n".join(text), df, df_cross
 
