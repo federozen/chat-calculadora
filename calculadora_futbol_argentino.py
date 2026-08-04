@@ -1984,12 +1984,77 @@ ESPN_LIGAS = {
     "Mundial FIFA": "fifa.world",
 }
 
-def _espn_get(url, timeout=30):
+@st.cache_data(ttl=600, show_spinner=False)
+def _espn_get(url, timeout=30, retries=2):
+    """Consulta ESPN, guarda respuestas 10 minutos e identifica la URL que falla."""
+    import time
     import requests as _rq
-    r = _rq.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
-    if r.status_code >= 400:
-        raise RuntimeError(f"ESPN respondió {r.status_code}")
-    return r.json()
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/150.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "es-AR,es;q=0.9,en;q=0.7",
+        "Referer": "https://www.espn.com.ar/",
+        "Cache-Control": "no-cache",
+    }
+
+    retryable_statuses = {429, 500, 502, 503, 504}
+    last_error = None
+
+    for attempt in range(retries + 1):
+        try:
+            response = _rq.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=True,
+            )
+        except _rq.RequestException as exc:
+            last_error = (
+                f"Error de red al consultar ESPN en {url}: "
+                f"{exc.__class__.__name__}: {exc}"
+            )
+        else:
+            if "/standings" in url:
+                tipo = "tabla de posiciones"
+            elif "/scoreboard" in url:
+                tipo = "fixture/resultados"
+            else:
+                tipo = "datos"
+
+            if response.status_code == 200:
+                try:
+                    return response.json()
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"ESPN respondió en {response.url}, pero la respuesta "
+                        f"de {tipo} no era JSON válido: {exc}"
+                    ) from exc
+
+            mensaje = (
+                f"{tipo}: ESPN respondió HTTP {response.status_code} "
+                f"en {response.url}"
+            )
+
+            if response.status_code == 403:
+                raise RuntimeError(
+                    f"{mensaje}. ESPN rechazó la solicitud automática. "
+                    "Puede estar bloqueando la IP del servidor."
+                )
+
+            if response.status_code not in retryable_statuses:
+                raise RuntimeError(mensaje)
+
+            last_error = mensaje
+
+        if attempt < retries:
+            time.sleep(1.5 * (attempt + 1))
+
+    raise RuntimeError(last_error or f"No se pudo consultar ESPN en {url}")
 
 def espn_tabla(liga, timeout=30):
     """Tabla de posiciones desde ESPN. Devuelve (base, zonas_sugeridas_txt, error)."""
@@ -1999,7 +2064,7 @@ def espn_tabla(liga, timeout=30):
     try:
         data = _espn_get(f"https://site.api.espn.com/apis/v2/sports/soccer/{lg}/standings", timeout)
     except Exception as e:
-        return {}, "", f"No pude conectar con ESPN: {e}"
+        return {}, "", f"No pude obtener la tabla desde ESPN. {e}"
     base, notas = {}, {}
     def _walk(node):
         if isinstance(node, dict):
@@ -2046,7 +2111,7 @@ def espn_fixture(liga, dias=120, timeout=30, max_req=30):
     try:
         cab = _espn_get(f"https://site.api.espn.com/apis/site/v2/sports/soccer/{lg}/scoreboard", timeout)
     except Exception as e:
-        return [], [], "", f"No pude conectar con ESPN: {e}"
+        return [], [], "", f"No pude obtener el fixture desde ESPN. {e}"
     hoy = _dt.date.today() - _dt.timedelta(days=3); fin = _dt.date.today() + _dt.timedelta(days=int(dias))
     cal = []
     try:
@@ -2150,7 +2215,7 @@ def espn_lpf_zonas(liga="arg.1", timeout=30):
     try:
         data = _espn_get(f"https://site.api.espn.com/apis/v2/sports/soccer/{lg}/standings", timeout)
     except Exception as e:
-        return {}, f"No pude conectar con ESPN: {e}"
+        return {}, f"No pude obtener las zonas desde ESPN. {e}"
     grupos = []
     def _walk(node):
         if isinstance(node, dict):
