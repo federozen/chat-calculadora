@@ -1,7 +1,7 @@
 """
 ⚽ Calculadora de escenarios — LPF 2026
 Convertido de Jupyter Notebook (v2) a Streamlit
-Actualización 3.6.4: narrativas finales revisadas para playoffs, copas, zonas y previa de fecha.
+Actualización 3.7.0: próximo partido por calendario real y otra cancha por objetivo.
 """
 
 import streamlit as st
@@ -2790,9 +2790,18 @@ def espn_fixture(liga, dias=120, timeout=30, max_req=30):
                 continue
             vistos.add(eid)
             try:
-                _d = str(ev.get("date") or comp.get("date") or "")[:10]
+                _iso = str(ev.get("date") or comp.get("date") or "").strip()
+                _d = _iso[:10]
                 if _d:
+                    _canon_pair = (canon_club(ln), canon_club(vn))
                     globals()["_ESPN_DIA"][(ln, vn)] = _d
+                    globals()["_ESPN_DIA"][_canon_pair] = _d
+                    globals()["_ESPN_FECHA_HORA"] = globals().get("_ESPN_FECHA_HORA") or {}
+                    globals()["_ESPN_FECHA_HORA"][(ln, vn)] = _iso
+                    globals()["_ESPN_FECHA_HORA"][_canon_pair] = _iso
+                    _schedule = dict(st.session_state.get("LPF_SCHEDULE") or {})
+                    _schedule[f"{_canon_pair[0]}|||{_canon_pair[1]}"] = _iso
+                    st.session_state["LPF_SCHEDULE"] = _schedule
             except Exception:
                 pass
             t = ((comp.get("status") or {}).get("type") or {})
@@ -7029,7 +7038,7 @@ def _chat_catalog(E, team, other):
                 ("Chances de Libertadores", "Probabilidad estimada sobre la anual sin campeones.", f"Chances de {team} para la Libertadores"),
                 ("Chances de Sudamericana", "Probabilidad estimada sobre la anual sin campeones.", f"Chances de {team} para la Sudamericana"),
                 ("Qué le conviene para Libertadores", "Resultados ajenos que mejoran su acceso a la copa.", f"¿Qué le conviene a {team} para la Libertadores?"),
-                ("Qué le conviene para Sudamericana", "Resultados ajenos que mejoran su acceso a la copa.", f"¿Qué le conviene a {team} para la Sudamericana?"),
+                ("Qué le conviene para entrar a las copas", "Resultados ajenos que mejoran su acceso a Sudamericana o Libertadores.", f"¿Qué le conviene a {team} para entrar a las copas?"),
                 ("Panorama completo de copas", "Libertadores y Sudamericana en una misma respuesta.", "Copas 2027"),
             ],
             "📉 Descenso": [
@@ -7262,6 +7271,164 @@ def lpf_etiqueta_jornada(jornada, atrasados):
     return (f"Fecha {jornada} (más {n} partido{'s' if n != 1 else ''} postergado"
             f"{'s' if n != 1 else ''} de la fecha {det})")
 
+
+
+def _lpf_parse_datetime(value):
+    """Convierte una fecha ISO de la fuente a hora oficial argentina."""
+    import datetime as _dt
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        parsed = _dt.datetime.fromisoformat(raw)
+    except Exception:
+        try:
+            parsed = _dt.datetime.strptime(raw[:10], "%Y-%m-%d")
+        except Exception:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    argentina = _dt.timezone(_dt.timedelta(hours=-3))
+    return parsed.astimezone(argentina)
+
+
+def _lpf_schedule_map():
+    """Agenda conocida por partido, con nombres canónicos y datetimes de Argentina."""
+    out = {}
+    sources = [globals().get("_ESPN_FECHA_HORA") or {}, st.session_state.get("LPF_SCHEDULE") or {}]
+    for source in sources:
+        for raw_key, raw_value in source.items():
+            if isinstance(raw_key, str) and "|||" in raw_key:
+                left, right = raw_key.split("|||", 1)
+                key = (canon_club(left), canon_club(right))
+            elif isinstance(raw_key, (tuple, list)) and len(raw_key) == 2:
+                key = (canon_club(raw_key[0]), canon_club(raw_key[1]))
+            else:
+                continue
+            parsed = _lpf_parse_datetime(raw_value)
+            if parsed:
+                out[key] = parsed
+    # Compatibilidad con sesiones anteriores que sólo guardaron YYYY-MM-DD.
+    for raw_key, raw_value in (globals().get("_ESPN_DIA") or {}).items():
+        if not isinstance(raw_key, (tuple, list)) or len(raw_key) != 2:
+            continue
+        key = (canon_club(raw_key[0]), canon_club(raw_key[1]))
+        if key not in out:
+            parsed = _lpf_parse_datetime(str(raw_value)[:10] + "T15:00:00-03:00")
+            if parsed:
+                out[key] = parsed
+    return out
+
+
+def _lpf_match_round(match, games=None):
+    games = games or LPF_FIXTURE
+    fmap = {(g["l"], g["v"]): g.get("f") for g in games}
+    return fmap.get(tuple(match))
+
+
+def _lpf_match_datetime(match):
+    return _lpf_schedule_map().get(tuple(match))
+
+
+def _lpf_format_datetime(value):
+    dt = value if hasattr(value, "strftime") else _lpf_parse_datetime(value)
+    if not dt:
+        return ""
+    weekdays = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+    months = ("enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre")
+    return f"{weekdays[dt.weekday()]} {dt.day} de {months[dt.month - 1]} a las {dt:%H.%M}"
+
+
+def lpf_partidos_equipo_ordenados(equipo, pend, games=None):
+    """Pendientes del equipo ordenados primero por fecha/hora real y luego por fecha oficial."""
+    games = games or LPF_FIXTURE
+    rows = []
+    for match in pend or []:
+        match = tuple(match)
+        if equipo not in match:
+            continue
+        scheduled = _lpf_match_datetime(match)
+        round_no = _lpf_match_round(match, games)
+        # Los partidos con programación real conocida tienen prioridad. Si la fuente
+        # no aporta fecha/hora, se conserva el orden oficial del fixture como respaldo.
+        key = (0, scheduled) if scheduled else (1, round_no if round_no is not None else 999)
+        rows.append({"match": match, "round": round_no, "scheduled_at": scheduled, "sort_key": key})
+    rows.sort(key=lambda row: (row["sort_key"], row["match"][0], row["match"][1]))
+    return rows
+
+
+def lpf_proximo_partido_equipo(equipo, pend, games=None):
+    ordered = lpf_partidos_equipo_ordenados(equipo, pend, games)
+    return ordered[0] if ordered else None
+
+
+def _lpf_scope_games(equipo, pend, scope="next_team_match", fecha=None):
+    """Resuelve la ventana de análisis sin confundir fecha oficial con calendario real."""
+    prox, official, postponed = lpf_jornada_actual(pend, forzar=fecha)
+    ordered_all = []
+    for match in pend or []:
+        match = tuple(match)
+        scheduled = _lpf_match_datetime(match)
+        round_no = _lpf_match_round(match)
+        key = (0, scheduled) if scheduled else (1, round_no if round_no is not None else 999)
+        ordered_all.append({"match": match, "round": round_no, "scheduled_at": scheduled, "sort_key": key})
+    ordered_all.sort(key=lambda row: (row["sort_key"], row["match"][0], row["match"][1]))
+    own = lpf_proximo_partido_equipo(equipo, pend)
+
+    if scope == "next_team_match":
+        games = [own["match"]] if own else []
+        label = "próximo partido real"
+    elif scope == "next_team_day":
+        if own and own.get("scheduled_at"):
+            day = own["scheduled_at"].date()
+            games = [row["match"] for row in ordered_all if row.get("scheduled_at") and row["scheduled_at"].date() == day]
+            label = f"partidos del {_lpf_format_datetime(own['scheduled_at']).split(' a las ')[0]}"
+        elif own:
+            # Sin agenda horaria confiable, la fecha oficial es el respaldo más honesto.
+            games = list(official) + [match for match, _round in postponed]
+            label = lpf_etiqueta_jornada(prox, postponed) if prox is not None else "próxima ventana"
+        else:
+            games = []
+            label = "próximo día de competencia"
+    elif scope == "postponed_only":
+        games = [match for match, _round in postponed]
+        label = f"postergados anteriores a la Fecha {prox}" if prox is not None else "postergados"
+    elif scope == "extended_window":
+        games = list(official) + [match for match, _round in postponed]
+        label = lpf_etiqueta_jornada(prox, postponed)
+    else:
+        games = list(official)
+        label = f"Fecha {prox} oficial" if prox is not None else "fecha oficial"
+
+    own_match = next((match for match in games if equipo in match), None)
+    if scope in ("next_team_match", "next_team_day") and own:
+        own_match = own["match"]
+    return {
+        "round": prox,
+        "games": games,
+        "label": label,
+        "own_match": own_match,
+        "own_meta": own,
+        "postponed": postponed,
+    }
+
+
+def _lpf_scope_from_query(q, default="next_team_day"):
+    text = _zlow(q)
+    if any(token in text for token in ("solo posterg", "sólo posterg")):
+        return "postponed_only"
+    if any(token in text for token in ("fecha y posterg", "ventana completa", "fecha completa")):
+        return "extended_window"
+    if "fecha oficial" in text:
+        return "official_round"
+    if any(token in text for token in ("proximo partido", "próximo partido", "partido real")):
+        return "next_team_match"
+    if any(token in text for token in ("mismo dia", "mismo día", "ese dia", "ese día", "otra cancha")):
+        return "next_team_day"
+    return default
+
 def lpf_equipos_con_atraso(pend, games=None):
     """{equipo: partidos atrasados} — los que tienen partidos de fechas previas a
     la jornada en juego (juegan menos partidos que el resto: distorsiona la tabla)."""
@@ -7308,7 +7475,7 @@ def lpf_previa_fecha_sim(Z, rest, pend, jugados=None, fecha=None):
         pl, pe, pv = _lpf_prob_partido(l, v, s)
         tipo, zona = tipo_map.get((l, v), ("zona", None))
         etiqueta = (f"Zona {zona}" if tipo == "zona" and zona else "Interzonal")
-        rows.append({"Partido": f"{l} – {v}", "Cuándo": f"Fecha {prox}", "Tipo": etiqueta,
+        rows.append({"Partido": f"{l} – {v}", "Cuándo": (_lpf_format_datetime(_lpf_match_datetime((l, v))) or f"Fecha {prox}"), "Tipo": etiqueta,
                      "Gana local %": round(100 * pl),
                      "Empate %": round(100 * pe),
                      "Gana visita %": round(100 * pv)})
@@ -7316,7 +7483,7 @@ def lpf_previa_fecha_sim(Z, rest, pend, jugados=None, fecha=None):
         pl, pe, pv = _lpf_prob_partido(l, v, s)
         tipo, zona = tipo_map.get((l, v), ("zona", None))
         etiqueta = (f"Zona {zona}" if tipo == "zona" and zona else "Interzonal")
-        rows.append({"Partido": f"{l} – {v}", "Cuándo": f"Postergado F{f}", "Tipo": etiqueta,
+        rows.append({"Partido": f"{l} – {v}", "Cuándo": ((_lpf_format_datetime(_lpf_match_datetime((l, v))) + f" · postergado F{f}") if _lpf_match_datetime((l, v)) else f"Postergado F{f}"), "Tipo": etiqueta,
                      "Gana local %": round(100 * pl),
                      "Empate %": round(100 * pe),
                      "Gana visita %": round(100 * pv)})
@@ -7422,9 +7589,7 @@ def lpf_arbol_sim(equipo, Z, rest, pend, top=_LPF_TOP_OCTAVOS, seed=17, jugados=
     if not lab or equipo not in Z.get(lab, {}):
         return None, None
     base = Z[lab]
-    fmap = _lpf_fecha_de(pend)
-    mios = sorted([((l, v), f) for (l, v), f in fmap.items()
-                   if equipo in (l, v) and f is not None], key=lambda x: x[1])
+    mios = [(row["match"], row["round"]) for row in lpf_partidos_equipo_ordenados(equipo, pend)]
     if not mios:
         return None, None
     n = 12000 if len(pend) <= 30 else 5000        # con pocas fechas, casi exacto
@@ -7455,7 +7620,7 @@ def lpf_arbol_sim(equipo, Z, rest, pend, top=_LPF_TOP_OCTAVOS, seed=17, jugados=
     sw = swings[0]
     L = [f"**Árbol de {equipo}** — chances de entrar a octavos (los 8 primeros de la Zona {lab}).",
          f"Hoy, sin jugar nada, está en **{round(base_ch)}%**.",
-         f"Su próximo partido es en la **Fecha {fx}** {localia} ante **{rival}**:"]
+         f"Su próximo partido es {localia} ante **{rival}**" + (f" (**Fecha {fx}**)" if fx is not None else "") + ":"]
     if len(swings) > 1 and sw[0] >= 3:
         L.append(f"De los próximos partidos, el **bisagra es ante {sw[1]} (Fecha {sw[2]})**: "
                  f"ganarlo lo pone en {round(sw[3])}% y perderlo lo deja en {round(sw[4])}%.")
@@ -7464,17 +7629,15 @@ def lpf_arbol_sim(equipo, Z, rest, pend, top=_LPF_TOP_OCTAVOS, seed=17, jugados=
     return "\n\n".join(L), df
 
 
-def lpf_otros_resultados_sim(equipo, Z, rest, pend, top=_LPF_TOP_OCTAVOS, jugados=None, seed=19, fecha=None):
+def lpf_otros_resultados_sim(equipo, Z, rest, pend, top=_LPF_TOP_OCTAVOS, jugados=None, seed=19, fecha=None, scope="next_team_day"):
     """Impacto de la otra cancha con control explícito del ruido Monte Carlo."""
     import math
     lab = lpf_zona_de_equipo(equipo, Z)
     if not lab or equipo not in Z.get(lab, {}):
         return None, None
     base = Z[lab]
-    prox, jornada, atrasados = lpf_jornada_actual(pend, forzar=fecha)
-    if prox is None:
-        return None, None
-    all_games = list(jornada) + [lv for lv, _f in atrasados]
+    window = _lpf_scope_games(equipo, pend, scope=scope, fecha=fecha)
+    all_games = list(window["games"])
     games = [(l, v) for l, v in all_games if equipo not in (l, v) and (l in base or v in base)]
     if not games:
         return None, None
@@ -7526,8 +7689,8 @@ def lpf_otros_resultados_sim(equipo, Z, rest, pend, top=_LPF_TOP_OCTAVOS, jugado
         })
     rows.sort(key=lambda row: -row["_impact"])
     significant = [row for row in rows if row["_impact"] >= noise]
-    scope = f"Fecha {prox}" + (f" + {len(atrasados)} postergado(s)" if atrasados else "")
-    text = [f"## La otra cancha para {equipo} · {scope}",
+    scope_label = window["label"]
+    text = [f"## La otra cancha para {equipo} · {scope_label}",
             f"**Objetivo:** entrar a los playoffs de la Zona {lab}.  "
             f"**Probabilidad base estimada:** {_fmt_num_es(base_ch, 1)}%."]
     if significant:
@@ -7634,41 +7797,51 @@ def _pos_hoy(target, tabla, score_after):
 def _ord(p):
     return f"{p}º"
 
-def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None, scope="extended_window"):
-    """Previa exacta por resultado propio para fecha oficial o ventana ampliada."""
+
+def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None, scope="next_team_match"):
+    """Previa exacta del próximo partido real o de una ventana elegida."""
     lab = lpf_zona_de_equipo(equipo, Z)
     if not lab or equipo not in Z.get(lab, {}):
         return None, None
-    prox, official_games, postponed = lpf_jornada_actual(pend, forzar=fecha)
-    if prox is None:
-        return None, None
-    if scope == "official_round":
-        games = list(official_games)
-        scope_label = f"Fecha {prox} oficial"
-    elif scope == "postponed_only":
-        games = [match for match, _round in postponed]
-        scope_label = f"Postergados asociados a la Fecha {prox}"
-    else:
-        games = list(official_games) + [match for match, _round in postponed]
-        scope_label = f"Fecha {prox}" + (f" + {len(postponed)} postergado(s)" if postponed else "")
-    own_match = next((match for match in official_games if equipo in match and match in games), None)
-    if own_match is None:
-        own_match = next((match for match in games if equipo in match), None)
-    lines = [f"## Previa de {scope_label} para {equipo}"]
-    if postponed and scope == "extended_window":
+    window = _lpf_scope_games(equipo, pend, scope=scope, fecha=fecha)
+    games = list(window["games"])
+    own_match = window.get("own_match")
+    own_meta = window.get("own_meta") or {}
+    title = f"## Próximo partido de {equipo}" if scope == "next_team_match" else f"## Previa de {window['label']} para {equipo}"
+    lines = [title]
+
+    if not games:
+        lines.append("No hay partidos pendientes en el alcance elegido.")
+        return "\n\n".join(lines), None
+    if not own_match:
+        lines.append(f"{equipo} no juega en esta ventana. La tabla puede moverse por resultados ajenos, "
+                     "pero no corresponde mostrar ramas gana/empata/pierde.")
+        return "\n\n".join(lines), None
+
+    local, visitor = own_match
+    rival = visitor if local == equipo else local
+    lines.append(f"Juega **{'de local' if local == equipo else 'de visitante'} ante {rival}**.")
+    scheduled = own_meta.get("scheduled_at") or _lpf_match_datetime(own_match)
+    round_no = own_meta.get("round") or _lpf_match_round(own_match)
+    current_round, _official, _postponed = lpf_jornada_actual(pend, forzar=fecha)
+    if scheduled:
+        lines.append(f"Está programado para **{_lpf_format_datetime(scheduled)}**, en hora argentina.")
+    elif scope in ("next_team_match", "next_team_day"):
+        lines.append("La fuente no aportó una fecha y hora confiables para este partido; se usó el orden del fixture oficial como respaldo.")
+    if round_no is not None:
+        if current_round is not None and round_no < current_round:
+            lines.append(f"Es un **partido pendiente de la Fecha {round_no}**, aunque se juegue antes que la próxima jornada completa.")
+        else:
+            lines.append(f"Corresponde a la **Fecha {round_no}**.")
+
+    postponed = window.get("postponed") or []
+    if scope == "extended_window" and postponed:
         doubles = sorted(team for team in {x for match in games for x in match}
                          if sum(team in match for match in games) > 1)
         lines.append(f"La ventana incluye **{len(postponed)} partido(s) postergado(s)**. "
                      "El motor analiza todos los encuentros juntos; no omite el segundo partido de los equipos que juegan dos veces.")
         if doubles:
             lines.append("Juegan dos veces en la ventana: **" + ", ".join(doubles) + "**.")
-    if not own_match:
-        lines.append(f"{equipo} no juega en esta ventana. La tabla puede moverse por resultados ajenos, "
-                     "pero no corresponde mostrar ramas gana/empata/pierde.")
-        return "\n\n".join(lines), None
-    local, visitor = own_match
-    rival = visitor if local == equipo else local
-    lines.append(f"Juega **{'de local' if local == equipo else 'de visitante'} ante {rival}**.")
 
     rows = []
     zone_scenarios = exact_result_scenarios(Z[lab], games, equipo, own_match, _LPF_TOP_OCTAVOS)
@@ -7686,7 +7859,6 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None, scop
                           "; no puede salir" if scenario["can_enter"] and not scenario["can_fail"] else ""),
         })
 
-    # La misma ventana sobre la Tabla Anual, siempre que haya una base validada.
     if anual and equipo in anual:
         annual_scenarios = exact_result_scenarios(anual, games, equipo, own_match, len(anual))
         for scenario in annual_scenarios:
@@ -7701,9 +7873,7 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None, scop
                 "Lectura": "Rango general; la tabla efectiva de copas excluye a los campeones ya clasificados",
             })
 
-    win = zone_scenarios[0]
-    draw = zone_scenarios[1]
-    loss = zone_scenarios[2]
+    win, draw, loss = zone_scenarios[0], zone_scenarios[1], zone_scenarios[2]
     if win["best_rank"] and win["best_rank"] > 1:
         lines.append(f"**No puede terminar primero:** aun ganando, el mejor puesto posible es "
                      f"**{_ord(win['best_rank'])}**. El cálculo contempla victorias, empates y derrotas de los rivales; "
@@ -7719,7 +7889,6 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None, scop
                  "Cuando dos equipos terminan igualados, el rango incluye tanto el desempate favorable como el adverso; "
                  "no inventa marcadores futuros ni afirma quién ganará por DG, GF, mano a mano, fair play o sorteo._")
     return "\n\n".join(lines), pd.DataFrame(rows)
-
 
 def _lpf_ctx(Z, rest, apertura, camps, extras, prom, n_anual=1, n_prom=1):
     """Precalcula todo lo estable para simular objetivos de la anual/promedios."""
@@ -7775,7 +7944,7 @@ def _obj_bool(objetivo, X, add, idx, ctx):
         key = np.array([ctx["zpts"][e] + ctx["zdg"][e] * 1e-4 for e in zt])[None, :] + eps + add[:, [idx[e] for e in zt]]
         xj = zt.index(X)
         return ((key > key[:, xj:xj + 1]).sum(1) + 1) <= 8
-    if objetivo in ("libertadores", "sudamericana"):
+    if objetivo in ("libertadores", "sudamericana", "al_menos_sudamericana"):
         red = ctx["reducida"]
         if X not in red:
             return np.zeros(n, bool)
@@ -7785,6 +7954,8 @@ def _obj_bool(objetivo, X, add, idx, ctx):
         rank = (key > key[:, xj:xj + 1]).sum(1) + 1
         if objetivo == "libertadores":
             return rank <= ctx["n_lib"]
+        if objetivo == "al_menos_sudamericana":
+            return rank <= ctx["n_lib"] + 6
         return (rank > ctx["n_lib"]) & (rank <= ctx["n_lib"] + 6)
     if objetivo == "descenso":
         prom = ctx["prom"]; rest = ctx["rest"]
@@ -7808,18 +7979,34 @@ def _obj_bool(objetivo, X, add, idx, ctx):
 
 def _objetivo_lpf(q):
     z = _zlow(q)
+    explicit = None
     if "libertad" in z:
-        return "libertadores"
-    if "sudameric" in z:
-        return "sudamericana"
-    if any(w in z for w in ("descenso", "descender", "no descend", "salvar", "salvarse", "permanencia", "no bajar", "no se va")):
-        return "descenso"
-    if any(w in z for w in ("copa", "internacional")):
-        return "libertadores"
+        explicit = "libertadores"
+    elif "sudameric" in z and any(word in z for word in ("estricta", "especificamente", "específicamente", "solo sudamericana", "sólo sudamericana")):
+        explicit = "sudamericana"
+    elif "sudameric" in z:
+        explicit = "al_menos_sudamericana"
+    elif any(w in z for w in ("descenso", "descender", "no descend", "salvar", "salvarse", "permanencia", "no bajar", "no se va")):
+        explicit = "descenso"
+    elif any(w in z for w in ("copa", "internacional")):
+        explicit = "al_menos_sudamericana"
+    elif any(w in z for w in ("playoff", "octavos", "top 8", "zona")):
+        explicit = "playoffs"
+    if explicit:
+        st.session_state["LPF_LAST_OBJECTIVE"] = explicit
+        return explicit
+    remembered = st.session_state.get("LPF_LAST_OBJECTIVE")
+    if remembered in ("playoffs", "libertadores", "al_menos_sudamericana", "sudamericana", "descenso"):
+        return remembered
     return "playoffs"
 
-_OBJ_NOMBRE = {"libertadores": "la Libertadores", "sudamericana": "la Sudamericana",
-               "descenso": "no descender", "playoffs": "los playoffs"}
+_OBJ_NOMBRE = {
+    "libertadores": "la Libertadores",
+    "al_menos_sudamericana": "al menos la Sudamericana",
+    "sudamericana": "la Sudamericana sin contar Libertadores",
+    "descenso": "no descender",
+    "playoffs": "los playoffs",
+}
 
 def _lpf_riesgo_descenso(X, ctx, margen=6):
     """True si X está entre los últimos `margen` de promedios o de la anual (hoy)."""
@@ -7839,7 +8026,7 @@ def lpf_chances_obj(objetivo, ctx, pend, jugados, n=8000, seed=23, destacar=None
         base_all.update(b)
     s = _fuerza_lpf(base_all, jugados)
     add, idx = _sim_lpf_add(eqs, pend, s, n, seed)
-    if objetivo in ("libertadores", "sudamericana"):
+    if objetivo in ("libertadores", "sudamericana", "al_menos_sudamericana"):
         red = ctx["reducida"]
         rows = []
         sum_lib = sum_sud = 0.0
@@ -7849,7 +8036,8 @@ def lpf_chances_obj(objetivo, ctx, pend, jugados, n=8000, seed=23, destacar=None
             sum_lib += float(pl); sum_sud += float(ps)
             rows.append({"Equipo": e, "Anual": f"{ctx['orden'].index(e)+1}º",
                          "Libertadores %": round(100 * pl), "Sudamericana %": round(100 * ps),
-                         "_k": pl if objetivo == "libertadores" else ps})
+                         "Al menos Sudamericana %": round(100 * (pl + ps)),
+                         "_k": pl if objetivo == "libertadores" else (pl + ps if objetivo == "al_menos_sudamericana" else ps)})
         rows.sort(key=lambda r: -r["_k"])
         if not np.isclose(sum_lib, ctx["n_lib"], atol=1e-10):
             raise AssertionError(f"Invariante Libertadores rota: {sum_lib} != {ctx['n_lib']}")
@@ -7865,7 +8053,9 @@ def lpf_chances_obj(objetivo, ctx, pend, jugados, n=8000, seed=23, destacar=None
         tit = ""
         if destacar and destacar in red:
             rr = next(r for r in rows if r["Equipo"] == destacar)
-            tit = f"**{destacar}:** {rr['Libertadores %']}% de entrar a la **Libertadores** y {rr['Sudamericana %']}% a la **Sudamericana**."
+            tit = (f"**{destacar}:** {rr['Libertadores %']}% de entrar a la **Libertadores**, "
+                       f"{rr['Sudamericana %']}% de terminar específicamente en **Sudamericana** y "
+                       f"{rr['Al menos Sudamericana %']}% de obtener **al menos una copa**.")
         return df, nota, tit
     if objetivo == "descenso":
         rows = []
@@ -7890,17 +8080,17 @@ def lpf_chances_obj(objetivo, ctx, pend, jugados, n=8000, seed=23, destacar=None
         return df, nota, tit
     return None, None, ""
 
-def lpf_conviene_obj(equipo, objetivo, ctx, pend, jugados, n=20000, seed=29, fecha=None):
+def lpf_conviene_obj(equipo, objetivo, ctx, pend, jugados, n=20000, seed=29, fecha=None, scope="next_team_day"):
     """La otra cancha para Anual/Promedios, con impacto y ruido explícitos."""
     import math
     eqs = ctx["equipos"]
     base_all = {team: row for base in ctx["Z"].values() for team, row in base.items()}
     strength = _fuerza_lpf(base_all, jugados)
     fmap = _lpf_fecha_de(pend)
-    prox, official, postponed = lpf_jornada_actual(pend, forzar=fecha)
-    if prox is None:
+    window = _lpf_scope_games(equipo, pend, scope=scope, fecha=fecha)
+    games = [match for match in window["games"] if equipo not in match]
+    if not window["games"]:
         return None, None, None
-    games = [match for match in (list(official) + [match for match, _f in postponed]) if equipo not in match]
     saving = objetivo == "descenso"
 
     def probability(forced):
@@ -7947,7 +8137,7 @@ def lpf_conviene_obj(equipo, objetivo, ctx, pend, jugados, n=20000, seed=29, fec
 
     # Cruces futuros entre competidores directos.
     add0, idx0 = _sim_lpf_add(eqs, pend, strength, n, seed)
-    universe = ctx["reducida"] if objetivo in ("libertadores", "sudamericana") else eqs
+    universe = ctx["reducida"] if objetivo in ("libertadores", "sudamericana", "al_menos_sudamericana") else eqs
     target_prob = {team: float(_obj_bool(objetivo, team, add0, idx0, ctx).mean()) for team in universe}
     contested = [(team, p) for team, p in target_prob.items() if 0.03 <= p <= 0.97 and team != equipo]
     contested.sort(key=lambda item: -min(item[1], 1 - item[1]))
@@ -7966,10 +8156,12 @@ def lpf_conviene_obj(equipo, objetivo, ctx, pend, jugados, n=20000, seed=29, fec
         for row in cross_rows[:8]
     ]) if cross_rows else None
 
-    objective_name = "salvarse del descenso" if saving else f"entrar a {_OBJ_NOMBRE[objetivo]}"
-    scope = f"Fecha {prox}" + (f" + {len(postponed)} postergado(s)" if postponed else "")
+    objective_name = ("salvarse del descenso" if saving else
+                      "obtener al menos Sudamericana" if objetivo == "al_menos_sudamericana" else
+                      f"entrar a {_OBJ_NOMBRE[objetivo]}")
+    scope_label = window["label"]
     text = [f"## La otra cancha para {equipo} · {objective_name}",
-            f"**Ventana:** {scope}. **Probabilidad base estimada:** {_fmt_num_es(baseline, 1)}%."]
+            f"**Ventana:** {scope_label}. **Probabilidad base estimada:** {_fmt_num_es(baseline, 1)}%."]
     if significant:
         top = significant[0]
         text.append(f"El partido de mayor impacto es **{top['Partido']}**: el mejor resultado es "
@@ -8005,7 +8197,7 @@ def _router_lpf(acc, E):
         _domain = "descenso"
     elif intent in ("necesita", "chances", "depende", "conviene"):
         _obj_gate = _objetivo_lpf(q)
-        _domain = "descenso" if _obj_gate == "descenso" else "copas" if _obj_gate in ("libertadores", "sudamericana") else "playoffs"
+        _domain = "descenso" if _obj_gate == "descenso" else "copas" if _obj_gate in ("libertadores", "sudamericana", "al_menos_sudamericana") else "playoffs"
     elif intent in ("octavos", "cruces", "duelos", "camino", "playoffs", "numero_magico", "puesto_exacto", "previa", "juega"):
         _domain = "playoffs"
     if _domain:
@@ -8026,7 +8218,7 @@ def _router_lpf(acc, E):
         _alive = E.get("copa_arg_vivos") or []
         _updated = E.get("copa_arg_updated", "")
         _source = E.get("copa_arg_source", "")
-        if _obj == "sudamericana":
+        if _obj in ("sudamericana", "al_menos_sudamericana"):
             _story = lpf_relato_sudamericana_texto(
                 Z, rest, ap, (c1, c2, c3), (xl, xs), _alive, _updated, _source
             )
@@ -8072,13 +8264,13 @@ def _router_lpf(acc, E):
             return [("warning", "Decime el equipo. Ej.: «qué le conviene a River» o «qué le conviene a River para la Libertadores».")]
         obj = _objetivo_lpf(q)
         if obj == "playoffs":
-            txt, dfc = lpf_otros_resultados_sim(equipo, Z, rest, pend, jugados=jugados)
+            txt, dfc = lpf_otros_resultados_sim(equipo, Z, rest, pend, jugados=jugados, scope=_lpf_scope_from_query(q))
             if dfc is None:
-                return [("info", f"En la próxima fecha no hay partidos de rivales de zona de {equipo} que le muevan la tabla "
+                return [("info", f"En la ventana elegida no hay partidos de rivales de zona de {equipo} que le muevan la tabla "
                                  f"(o {equipo} no está en zona de playoffs).")]
             return [("md", txt), ("df", dfc, f"{equipo}: qué te conviene en la otra cancha (playoffs)")]
         ctx = _lpf_ctx(Z, rest, ap, (c1, c2, c3), (xl, xs), prev, na, npro)
-        if obj in ("libertadores", "sudamericana") and equipo not in ctx["reducida"]:
+        if obj in ("libertadores", "sudamericana", "al_menos_sudamericana") and equipo not in ctx["reducida"]:
             return [("info", f"{equipo} no está en la tabla que reparte copas por la anual (o ya tiene plaza como campeón).")]
         if obj == "descenso":
             if not prev:
@@ -8087,7 +8279,7 @@ def _router_lpf(acc, E):
             if not riesgo:
                 return [("info", f"{equipo} no está en zona de riesgo: no aparece entre los últimos 6 de promedios ni de la anual, "
                                  f"así que no calculo el descenso para él (podés pedir sus **chances de Libertadores/Sudamericana** o sus **playoffs**).")]
-        txt, dfc, dfx = lpf_conviene_obj(equipo, obj, ctx, pend, jugados)
+        txt, dfc, dfx = lpf_conviene_obj(equipo, obj, ctx, pend, jugados, scope=_lpf_scope_from_query(q))
         if txt is None:
             return [("info", "No hay partidos pendientes para analizar la otra cancha.")]
         out = [("md", txt)]
@@ -8131,7 +8323,8 @@ def _router_lpf(acc, E):
         if df is None:
             return [("info", "No pude calcular esas chances.")]
         titulo = {"libertadores": "Chances de Libertadores y Sudamericana (por la anual)",
-                  "sudamericana": "Chances de Sudamericana y Libertadores (por la anual)",
+                  "al_menos_sudamericana": "Chances de obtener al menos una copa (por la anual)",
+                  "sudamericana": "Chances de terminar específicamente en Sudamericana (por la anual)",
                   "descenso": "Chances de descenso"}[obj]
         out = []
         if tit:
@@ -8171,8 +8364,8 @@ def _router_lpf(acc, E):
             return [("md", lpf_relato_zona_texto(Z, lab, rest))] if lab else [("warning", f"No encuentro a {equipo}.")]
         return [("md", lpf_relato_zona_texto(Z, l, rest)) for l in sorted(Z)]
     if intent in ("previa", "juega"):
-        if equipo and intent == "previa":
-            txt, dfe = lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prev)
+        if equipo:
+            txt, dfe = lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prev, scope="next_team_match")
             if dfe is not None:
                 return [("md", txt), ("df", dfe, f"{equipo}: cómo puede terminar la Fecha")]
         fx, dfp = lpf_previa_fecha_sim(Z, rest, pend, jugados)
@@ -8279,9 +8472,9 @@ AYUDA_LPF = """### ⚽ Calculadora LPF 2026 — guía de uso
 
 ### 🎯 Previa y escenarios por equipo
 - **Previa de River** (o «cómo puede terminar la fecha para River») — su partido y **entre qué puestos puede terminar la fecha**, en playoffs, copas y/o descenso según le corresponda. Rango **exacto** para la fecha.
-- **¿Qué le conviene a River?** (o «la otra cancha», «para quién hinchar») — qué resultado de cada partido de sus rivales le sirve, por simulación. Por defecto para playoffs; agregá **«para la Libertadores»**, **«para la Sudamericana»** o **«para salvarse»** según el objetivo.
+- **¿Qué le conviene a River?** (o «la otra cancha», «para quién hinchar») — qué resultado de cada partido de sus rivales le sirve, por simulación. Si venías consultando un objetivo, lo conserva. También podés aclarar **«para playoffs»**, **«para Libertadores»**, **«para entrar a las copas»** o **«para salvarse»**.
 - **Árbol de River** — cómo cambian sus chances según gane, empate o pierda el próximo; marca el **partido bisagra**
-- **Previa de la fecha** — estimación de cada partido de la próxima fecha (todos los partidos)
+- **Previa de Boca** — toma el próximo partido real por fecha y hora, aunque sea un postergado. **Previa de la fecha** mantiene la jornada oficial.
 
 ### 🔎 Por equipo
 - **Ficha de River** — puesto, ritmo, DG, rivales que le quedan y dificultad
@@ -9225,14 +9418,15 @@ def _rd_apply_results(E, results):
 
 
 def _rd_tree_dot(team, objective, base, pending):
-    match = next(((l, v) for l, v in pending if team in (l, v)), None)
+    next_info = lpf_proximo_partido_equipo(team, pending)
+    match = next_info["match"] if next_info else None
     if not match:
         return None
     rival = match[1] if match[0] == team else match[0]
     points = int(base.get(team, {}).get("pts", 0))
     goal = {"Playoffs": "seguir en carrera por los playoffs",
             "Libertadores": "pelear la Libertadores",
-            "Sudamericana": "pelear la Sudamericana",
+            "Al menos Sudamericana": "entrar a las copas",
             "Descenso": "alejarse del descenso"}[objective]
     return f'''digraph {{
       graph [rankdir=LR, bgcolor="transparent", pad="0.2"];
@@ -9310,11 +9504,12 @@ def render_newsroom(E):
     with report_tab:
         col_team, col_obj, col_mode = st.columns([1.4, 1, 0.8])
         team = col_team.selectbox("Equipo", teams, index=teams.index("River Plate") if "River Plate" in teams else 0)
-        objective = col_obj.selectbox("Objetivo", ["Playoffs", "Libertadores", "Sudamericana", "Descenso"])
+        objective = col_obj.selectbox("Objetivo", ["Playoffs", "Libertadores", "Al menos Sudamericana", "Descenso"])
+        st.session_state["LPF_LAST_OBJECTIVE"] = {"Playoffs": "playoffs", "Libertadores": "libertadores", "Al menos Sudamericana": "al_menos_sudamericana", "Descenso": "descenso"}[objective]
         mode = col_mode.radio("Momento", ["Previa", "Post"], horizontal=True)
         lab = lpf_zona_de_equipo(team, Z)
         _domain = ("playoffs" if objective == "Playoffs" else
-                   "copas" if objective in ("Libertadores", "Sudamericana") else "descenso")
+                   "copas" if objective in ("Libertadores", "Al menos Sudamericana") else "descenso")
         _gate = _lpf_data_gate(E, _domain)
         if _gate:
             ui_warning(_gate[1])
@@ -9329,7 +9524,7 @@ def render_newsroom(E):
                     E.get("intl") or ("", ""), E.get("copa_arg_vivos") or [],
                     E.get("copa_arg_updated", ""), E.get("copa_arg_source", ""),
                 ))
-            elif objective == "Sudamericana":
+            elif objective == "Al menos Sudamericana":
                 ui_markdown(lpf_relato_sudamericana_texto(
                     Z, rest, E.get("apertura") or {}, E.get("camps") or ("", "", ""),
                     E.get("intl") or ("", ""), E.get("copa_arg_vivos") or [],
@@ -9345,7 +9540,7 @@ def render_newsroom(E):
             exact = lpf_playoffs_texto(team, Z, rest, pending)
             base = Z[lab]
             cutoff = 8
-        elif objective in ("Libertadores", "Sudamericana"):
+        elif objective in ("Libertadores", "Al menos Sudamericana"):
             exact = lpf_copas_necesita_texto(team, Z, rest, E.get("apertura") or {},
                                               (c1, c2, c3), (xl, xs), pending)
             allocation = lpf_plazas_copas(Z, E.get("apertura") or {}, (c1, c2, c3), (xl, xs))
@@ -9405,7 +9600,7 @@ def render_newsroom(E):
             ui_warning(f"⚠️ **{team} tiene {_con_atraso[team]} partido(s) pendiente(s) de fechas anteriores.** "
                        f"Jugó menos que el resto: su lugar en la tabla se lee con esa salvedad (puede sumar de más) "
                        f"y su promedio se calcula sobre los partidos que le corresponden.")
-        preview_text, preview_df = lpf_previa_equipo_texto(team, Z, rest, pending, annual, previous, fecha=_sel)
+        preview_text, preview_df = lpf_previa_equipo_texto(team, Z, rest, pending, annual, previous, fecha=_sel, scope="next_team_match")
         if preview_text:
             ui_info(preview_text)
         if preview_df is not None:
@@ -9435,7 +9630,7 @@ def render_newsroom(E):
             else:
                 ctx = _lpf_ctx(Z, rest, E.get("apertura") or {}, (c1, c2, c3), (xl, xs), previous,
                                int(E.get("n_anual", 1)), int(E.get("n_prom", 1)))
-                obj = {"Libertadores": "libertadores", "Sudamericana": "sudamericana",
+                obj = {"Libertadores": "libertadores", "Al menos Sudamericana": "al_menos_sudamericana",
                        "Descenso": "descenso"}[objective]
                 probs, note, headline = lpf_chances_obj(obj, ctx, pending, E.get("jugados") or [], destacar=team)
                 if headline:
@@ -9505,11 +9700,17 @@ def render_newsroom(E):
                 def _preview_match_label(match):
                     _post = _postponed_lookup.get(match)
                     _suffix = f" · postergado F{_post}" if _post is not None else ""
-                    return f"{match[0]} – {match[1]}{_suffix}"
+                    _when = _lpf_format_datetime(_lpf_match_datetime(match))
+                    _time = f" · {_when}" if _when else ""
+                    return f"{match[0]} – {match[1]}{_time}{_suffix}"
 
+                _ordered_preview_games = sorted(
+                    next_games,
+                    key=lambda match: (0, _lpf_match_datetime(match)) if _lpf_match_datetime(match) else (1, _lpf_match_round(match) or 999),
+                )
                 _narrative_match = ui_selectbox(
                     "Partido",
-                    next_games,
+                    _ordered_preview_games,
                     format_func=_preview_match_label,
                     key="rd_preview_narrative_match",
                 )
@@ -9909,12 +10110,17 @@ def render_scenarios_workspace(E, default_team=None, embedded=False):
     if scenario_tool == "Gana / empata / pierde":
         scope_label = st.radio(
             "Alcance",
-            ["Fecha oficial", "Sólo postergados", "Fecha + postergados"],
+            ["Próximo partido real", "Día del próximo partido", "Fecha oficial", "Sólo postergados", "Fecha + postergados"],
             horizontal=True,
             key=f"scenario_result_scope_{team}",
         )
-        scope = {"Fecha oficial": "official_round", "Sólo postergados": "postponed_only",
-                 "Fecha + postergados": "extended_window"}[scope_label]
+        scope = {
+            "Próximo partido real": "next_team_match",
+            "Día del próximo partido": "next_team_day",
+            "Fecha oficial": "official_round",
+            "Sólo postergados": "postponed_only",
+            "Fecha + postergados": "extended_window",
+        }[scope_label]
         text, frame = lpf_previa_equipo_texto(team, Z, rest, pending, annual, previous, scope=scope)
         if text:
             ui_markdown(text)
@@ -10067,7 +10273,7 @@ def render_visualizations_workspace(E):
     team = ui_selectbox("Equipo", teams, index=teams.index("River Plate") if "River Plate" in teams else 0, key="viz_team")
     lab = lpf_zona_de_equipo(team, Z)
     tab_team, tab_zone, tab_comp, tab_round, tab_other, tab_radar = st.tabs([
-        "Equipo", "Zona", "Copas y descenso", "Próxima fecha", "La otra cancha", "Radar final"
+        "Equipo", "Zona", "Copas y descenso", "Próximo partido", "La otra cancha", "Radar final"
     ])
 
     with tab_team:
@@ -10125,9 +10331,21 @@ def render_visualizations_workspace(E):
 
     with tab_round:
         annual = lpf_anual_base(Z, E.get("apertura") or {})
+        _viz_preview_label = st.radio(
+            "Alcance",
+            ["Próximo partido real", "Día del próximo partido", "Fecha oficial", "Fecha + postergados"],
+            horizontal=True,
+            key="viz_preview_scope",
+        )
+        _viz_preview_scope = {
+            "Próximo partido real": "next_team_match",
+            "Día del próximo partido": "next_team_day",
+            "Fecha oficial": "official_round",
+            "Fecha + postergados": "extended_window",
+        }[_viz_preview_label]
         text, frame = lpf_previa_equipo_texto(
             team, Z, rest, pending, annual, st.session_state.get("PROMEDIOS") or {},
-            scope="official_round",
+            scope=_viz_preview_scope,
         )
         if text:
             ui_markdown(text)
@@ -10142,26 +10360,73 @@ def render_visualizations_workspace(E):
                 ui_caption("En puestos, una barra menor es mejor. El intervalo abre los desempates futuros.")
 
     with tab_other:
-        text, frame = lpf_otros_resultados_sim(team, Z, rest, pending, jugados=E.get("jugados") or [])
+        _other_c1, _other_c2 = st.columns([1, 1.4])
+        with _other_c1:
+            _viz_other_obj = st.radio(
+                "Objetivo",
+                ["Playoffs", "Libertadores", "Al menos Sudamericana", "Descenso"],
+                key="viz_other_objective",
+            )
+        with _other_c2:
+            _viz_other_label = st.radio(
+                "Partidos a analizar",
+                ["Día del próximo partido", "Fecha oficial", "Fecha + postergados"],
+                horizontal=True,
+                key="viz_other_scope",
+            )
+        _viz_other_scope = {
+            "Día del próximo partido": "next_team_day",
+            "Fecha oficial": "official_round",
+            "Fecha + postergados": "extended_window",
+        }[_viz_other_label]
+        st.session_state["LPF_LAST_OBJECTIVE"] = {
+            "Playoffs": "playoffs",
+            "Libertadores": "libertadores",
+            "Al menos Sudamericana": "al_menos_sudamericana",
+            "Descenso": "descenso",
+        }[_viz_other_obj]
+        if _viz_other_obj == "Playoffs":
+            text, frame = lpf_otros_resultados_sim(
+                team, Z, rest, pending, jugados=E.get("jugados") or [], scope=_viz_other_scope
+            )
+            crosses = None
+        else:
+            _other_domain = "descenso" if _viz_other_obj == "Descenso" else "copas"
+            _other_gate = _lpf_data_gate(E, _other_domain)
+            if _other_gate:
+                ui_warning(_other_gate[1])
+                text, frame, crosses = None, None, None
+            else:
+                _other_ctx = _lpf_ctx(
+                    Z, rest, E.get("apertura") or {}, E.get("camps") or ("", "", ""),
+                    E.get("intl") or ("", ""), st.session_state.get("PROMEDIOS") or {},
+                    E.get("n_anual", 1), E.get("n_prom", 1),
+                )
+                _other_obj = {
+                    "Libertadores": "libertadores",
+                    "Al menos Sudamericana": "al_menos_sudamericana",
+                    "Descenso": "descenso",
+                }[_viz_other_obj]
+                text, frame, crosses = lpf_conviene_obj(
+                    team, _other_obj, _other_ctx, pending, E.get("jugados") or [], scope=_viz_other_scope
+                )
         if text:
             ui_markdown(text)
         if frame is not None and not frame.empty:
             ui_dataframe(frame, use_container_width=True, hide_index=True)
             impact = frame[["Partido", "Diferencia"]].copy()
-            # La interfaz muestra decimales con coma (por ejemplo, "0,35 pp").
-            # Convertimos de forma segura al formato numerico que espera pandas.
             impact["Impacto (pp)"] = pd.to_numeric(
-                impact["Diferencia"]
-                .astype("string")
-                .str.replace(" pp", "", regex=False)
-                .str.replace(",", ".", regex=False),
+                impact["Diferencia"].astype("string").str.replace(" pp", "", regex=False).str.replace(",", ".", regex=False),
                 errors="coerce",
             )
             impact = impact.dropna(subset=["Impacto (pp)"])
             if not impact.empty:
                 st.bar_chart(impact.set_index("Partido")[["Impacto (pp)"]])
             else:
-                ui_caption("No hay valores numericos de impacto disponibles para graficar.")
+                ui_caption("No hay valores numéricos de impacto disponibles para graficar.")
+        if crosses is not None and not crosses.empty:
+            ui_markdown("#### Cruces futuros entre competidores")
+            ui_dataframe(crosses, use_container_width=True, hide_index=True)
 
     with tab_radar:
         render_definition_radar(E)
@@ -10182,12 +10447,13 @@ def render_guided_workspace(E):
         return
     c1, c2, c3 = st.columns([1.15, 1.15, 1.7])
     team = c1.selectbox("Equipo", teams, index=teams.index("River Plate") if "River Plate" in teams else 0, key="guide_team")
-    objective = c2.selectbox("Objetivo", ["Playoffs", "Libertadores", "Sudamericana", "Descenso"], key="guide_objective")
+    objective = c2.selectbox("Objetivo", ["Playoffs", "Libertadores", "Al menos Sudamericana", "Descenso"], key="guide_objective")
+    st.session_state["LPF_LAST_OBJECTIVE"] = {"Playoffs": "playoffs", "Libertadores": "libertadores", "Al menos Sudamericana": "al_menos_sudamericana", "Descenso": "descenso"}[objective]
     task = c3.selectbox("Vista", [
         "Resumen completo",
         "Situación general del equipo",
         "Panorama narrativo de la competencia",
-        "Cómo puede terminar la próxima fecha",
+        "Cómo puede terminar el próximo partido o la fecha",
         "Qué necesita para alcanzar el objetivo",
         "Qué resultados ajenos le convienen",
         "Escalera de puntajes: garantía y caminos con menos",
@@ -10196,10 +10462,34 @@ def render_guided_workspace(E):
         "Radar de las últimas seis fechas",
         "Herramientas de escenarios adaptadas del Mundial",
     ], key="guide_task")
-    scope = "extended_window"
-    if task == "Cómo puede terminar la próxima fecha":
-        scope_label = st.radio("Alcance", ["Fecha oficial", "Sólo postergados", "Fecha + postergados"], horizontal=True, key="guide_scope")
-        scope = {"Fecha oficial": "official_round", "Sólo postergados": "postponed_only", "Fecha + postergados": "extended_window"}[scope_label]
+    scope = "next_team_match"
+    other_scope = "next_team_day"
+    if task == "Cómo puede terminar el próximo partido o la fecha":
+        scope_label = st.radio(
+            "Alcance",
+            ["Próximo partido real", "Día del próximo partido", "Fecha oficial", "Sólo postergados", "Fecha + postergados"],
+            horizontal=True,
+            key="guide_scope",
+        )
+        scope = {
+            "Próximo partido real": "next_team_match",
+            "Día del próximo partido": "next_team_day",
+            "Fecha oficial": "official_round",
+            "Sólo postergados": "postponed_only",
+            "Fecha + postergados": "extended_window",
+        }[scope_label]
+    if task == "Qué resultados ajenos le convienen":
+        other_label = st.radio(
+            "Partidos a analizar",
+            ["Día del próximo partido", "Fecha oficial", "Fecha + postergados"],
+            horizontal=True,
+            key="guide_other_scope",
+        )
+        other_scope = {
+            "Día del próximo partido": "next_team_day",
+            "Fecha oficial": "official_round",
+            "Fecha + postergados": "extended_window",
+        }[other_label]
     other = None
     if task == "Comparar con otro equipo":
         other = ui_selectbox("Segundo equipo", [x for x in teams if x != team], key="guide_other")
@@ -10213,8 +10503,8 @@ def render_guided_workspace(E):
     _needed_domain = "playoffs"
     if task == "Herramientas de escenarios adaptadas del Mundial":
         _needed_domain = "playoffs"
-    elif objective in ("Libertadores", "Sudamericana") or task == "Comparar con otro equipo":
-        _needed_domain = "copas" if objective in ("Libertadores", "Sudamericana") else "playoffs"
+    elif objective in ("Libertadores", "Al menos Sudamericana") or task == "Comparar con otro equipo":
+        _needed_domain = "copas" if objective in ("Libertadores", "Al menos Sudamericana") else "playoffs"
     elif objective == "Descenso":
         _needed_domain = "descenso"
     _gate = _lpf_data_gate(E, _needed_domain)
@@ -10224,9 +10514,9 @@ def render_guided_workspace(E):
 
     if task == "Resumen completo":
         ui_markdown(ficha_liga_texto(team, Z[lab], rest, pending, LPF_ZONAS_PLAYOFF))
-        ui_markdown("### Próxima fecha")
+        ui_markdown("### Próximo partido")
         _preview_text, _preview_frame = lpf_previa_equipo_texto(
-            team, Z, rest, pending, annual, previous, scope="official_round"
+            team, Z, rest, pending, annual, previous, scope="next_team_match"
         )
         if _preview_text:
             ui_markdown(_preview_text)
@@ -10235,7 +10525,7 @@ def render_guided_workspace(E):
         with st.expander(f"Qué necesita para {objective.lower()}", expanded=False):
             if objective == "Playoffs":
                 ui_markdown(lpf_playoffs_texto(team, Z, rest, pending))
-            elif objective in ("Libertadores", "Sudamericana"):
+            elif objective in ("Libertadores", "Al menos Sudamericana"):
                 ui_markdown(lpf_copas_necesita_texto(
                     team, Z, rest, E.get("apertura") or {}, E.get("camps") or ("", "", ""),
                     E.get("intl") or ("", ""), pending
@@ -10254,7 +10544,7 @@ def render_guided_workspace(E):
                     E.get("intl") or ("", ""), E.get("copa_arg_vivos") or [],
                     E.get("copa_arg_updated", ""), E.get("copa_arg_source", ""),
                 ))
-            elif objective == "Sudamericana":
+            elif objective == "Al menos Sudamericana":
                 ui_markdown(lpf_relato_sudamericana_texto(
                     Z, rest, E.get("apertura") or {}, E.get("camps") or ("", "", ""),
                     E.get("intl") or ("", ""), E.get("copa_arg_vivos") or [],
@@ -10275,7 +10565,7 @@ def render_guided_workspace(E):
                 E.get("intl") or ("", ""), E.get("copa_arg_vivos") or [],
                 E.get("copa_arg_updated", ""), E.get("copa_arg_source", ""),
             ))
-        elif objective == "Sudamericana":
+        elif objective == "Al menos Sudamericana":
             ui_markdown(lpf_relato_sudamericana_texto(
                 Z, rest, E.get("apertura") or {}, E.get("camps") or ("", "", ""),
                 E.get("intl") or ("", ""), E.get("copa_arg_vivos") or [],
@@ -10285,26 +10575,26 @@ def render_guided_workspace(E):
             ui_markdown(lpf_relato_descenso_texto(
                 Z, rest, E.get("apertura") or {}, previous, E.get("n_anual", 1), E.get("n_prom", 1)
             ))
-    elif task == "Cómo puede terminar la próxima fecha":
+    elif task == "Cómo puede terminar el próximo partido o la fecha":
         text, frame = lpf_previa_equipo_texto(team, Z, rest, pending, annual, previous, scope=scope)
         if text: ui_markdown(text)
         if frame is not None: ui_dataframe(frame, use_container_width=True, hide_index=True)
     elif task == "Qué necesita para alcanzar el objetivo":
         if objective == "Playoffs":
             ui_markdown(lpf_playoffs_texto(team, Z, rest, pending))
-        elif objective in ("Libertadores", "Sudamericana"):
+        elif objective in ("Libertadores", "Al menos Sudamericana"):
             ui_markdown(lpf_copas_necesita_texto(team, Z, rest, E.get("apertura") or {}, E.get("camps") or ("", "", ""), E.get("intl") or ("", ""), pending))
         else:
             ui_markdown(lpf_descenso_texto(Z, rest, E.get("apertura") or {}, previous, E.get("n_anual", 1), E.get("n_prom", 1), team, pending))
     elif task == "Qué resultados ajenos le convienen":
         if objective == "Playoffs":
-            text, frame = lpf_otros_resultados_sim(team, Z, rest, pending, jugados=E.get("jugados") or [])
+            text, frame = lpf_otros_resultados_sim(team, Z, rest, pending, jugados=E.get("jugados") or [], scope=other_scope)
             if text: ui_markdown(text)
             if frame is not None: ui_dataframe(frame, use_container_width=True, hide_index=True)
         else:
             ctx = _lpf_ctx(Z, rest, E.get("apertura") or {}, E.get("camps") or ("", "", ""), E.get("intl") or ("", ""), previous, E.get("n_anual", 1), E.get("n_prom", 1))
-            obj = {"Libertadores": "libertadores", "Sudamericana": "sudamericana", "Descenso": "descenso"}[objective]
-            text, frame, crosses = lpf_conviene_obj(team, obj, ctx, pending, E.get("jugados") or [])
+            obj = {"Libertadores": "libertadores", "Al menos Sudamericana": "al_menos_sudamericana", "Descenso": "descenso"}[objective]
+            text, frame, crosses = lpf_conviene_obj(team, obj, ctx, pending, E.get("jugados") or [], scope=other_scope)
             if text: ui_markdown(text)
             if frame is not None: ui_dataframe(frame, use_container_width=True, hide_index=True)
             if crosses is not None: ui_dataframe(crosses, use_container_width=True, hide_index=True)
