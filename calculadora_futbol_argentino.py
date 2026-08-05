@@ -1,7 +1,7 @@
 """
 ⚽ Calculadora de escenarios — LPF 2026
 Convertido de Jupyter Notebook (v2) a Streamlit
-Actualización 3.7.4: tablas contextuales, exportación editorial y renglones reutilizables.
+Actualización 3.7.5: exportador estable y reporte editorial completo por equipo.
 """
 
 import streamlit as st
@@ -41,22 +41,20 @@ _UI_TABLE_SEQUENCE = 0
 
 
 def _safe_export_name(value):
+    import unicodedata
+
     text = editorialize_text(str(value or "tabla")).strip().lower()
-    text = re.sub(r"[^a-z0-9áéíóúüñ]+", "_", text, flags=re.IGNORECASE).strip("_")
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
     return text or "tabla"
 
 
-def _table_html_document(frame, title):
+def _table_html_fragment(frame, title):
     import html
 
     safe_title = html.escape(editorialize_text(str(title or "Tabla")))
     table_html = frame.to_html(index=False, border=0, classes="tabla-editorial", escape=True)
-    return f'''<!doctype html>
-<html lang="es">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{safe_title}</title>
+    return f'''<div class="tabla-editorial-wrap">
 <style>
 .tabla-editorial-wrap {{max-width:100%; overflow-x:auto; font-family:Arial,Helvetica,sans-serif; color:#202124;}}
 .tabla-editorial-title {{font-size:20px; font-weight:700; margin:0 0 12px;}}
@@ -65,17 +63,37 @@ table.tabla-editorial th {{background:#f1f3f4; text-align:left; font-weight:700;
 table.tabla-editorial td {{padding:9px 10px; border:1px solid #d9dde3; vertical-align:top;}}
 table.tabla-editorial tbody tr:nth-child(even) {{background:#fafafa;}}
 </style>
-</head>
-<body>
-<div class="tabla-editorial-wrap">
 <div class="tabla-editorial-title">{safe_title}</div>
 {table_html}
-</div>
+</div>'''
+
+
+def _table_html_document(frame, title):
+    import html
+
+    safe_title = html.escape(editorialize_text(str(title or "Tabla")))
+    fragment = _table_html_fragment(frame, title)
+    return f'''<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{safe_title}</title>
+</head>
+<body>
+{fragment}
 </body>
 </html>'''
 
 
-@st.cache_data(show_spinner=False)
+def _table_fingerprint(frame, title, file_name):
+    import hashlib
+
+    raw = frame.to_csv(index=False, sep="\x1f").encode("utf-8", errors="replace")
+    seed = (str(title or "") + "\x1e" + str(file_name or "")).encode("utf-8", errors="replace")
+    return hashlib.sha1(seed + raw).hexdigest()[:14]
+
+
 def _table_png_bytes(frame, title):
     import textwrap
     from io import BytesIO
@@ -91,8 +109,8 @@ def _table_png_bytes(frame, title):
         )
     nrows, ncols = visible.shape
     longest = max([len(str(x)) for x in visible.columns] + [len(str(x)) for x in visible.astype(str).to_numpy().ravel()] + [8])
-    fig_w = min(22, max(8, 1.45 * max(1, ncols) + min(8, longest / 18)))
-    fig_h = min(38, max(2.8, 0.58 * (nrows + 1) + 1.2))
+    fig_w = min(24, max(8, 1.55 * max(1, ncols) + min(9, longest / 18)))
+    fig_h = min(48, max(2.8, 0.62 * (nrows + 1) + 1.2))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=180)
     ax.axis("off")
     ax.set_title(editorialize_text(str(title or "Tabla")), loc="left", fontsize=15, fontweight="bold", pad=14)
@@ -105,7 +123,7 @@ def _table_png_bytes(frame, title):
         bbox=[0, 0, 1, 0.94],
     )
     table.auto_set_font_size(False)
-    table.set_fontsize(8.5 if ncols >= 7 else 9.5)
+    table.set_fontsize(7.8 if ncols >= 7 else 8.7 if ncols >= 5 else 9.5)
     table.auto_set_column_width(col=list(range(max(1, ncols))))
     for (row, _col), cell in table.get_celld().items():
         cell.set_linewidth(0.45)
@@ -117,27 +135,87 @@ def _table_png_bytes(frame, title):
     return buf.getvalue()
 
 
+def _build_table_export_payload(frame, title):
+    payload = {
+        "html_fragment": _table_html_fragment(frame, title),
+        "html_document": _table_html_document(frame, title).encode("utf-8"),
+        "csv": frame.to_csv(index=False, sep=";").encode("utf-8-sig"),
+        "text": frame.to_csv(index=False, sep="\t").encode("utf-8"),
+        "png": None,
+        "png_error": "",
+    }
+    try:
+        payload["png"] = _table_png_bytes(frame, title)
+    except Exception as exc:
+        payload["png_error"] = f"{type(exc).__name__}: {exc}"
+    return payload
+
+
 def _render_table_exports(frame, title, file_name, key):
     title = editorialize_text(str(title or "Tabla"))
     slug = _safe_export_name(file_name or title)
-    ready_key = f"{key}_ready"
-    with st.expander("Exportar esta tabla", expanded=False):
-        if st.button("Preparar archivos", key=f"{key}_prepare", use_container_width=True):
-            st.session_state[ready_key] = True
-        if not st.session_state.get(ready_key):
-            ui_caption("Prepará los archivos sólo cuando los necesites; así las tablas grandes no vuelven lenta la pantalla.")
-            return
-        html_doc = _table_html_document(frame, title)
-        csv_bytes = frame.to_csv(index=False, sep=";").encode("utf-8-sig")
-        text_bytes = frame.to_csv(index=False, sep="\t").encode("utf-8")
-        png_bytes = _table_png_bytes(frame, title)
-        c1, c2, c3, c4 = st.columns(4)
-        c1.download_button("PNG", png_bytes, file_name=f"{slug}.png", mime="image/png", key=f"{key}_png", use_container_width=True)
-        c2.download_button("HTML", html_doc.encode("utf-8"), file_name=f"{slug}.html", mime="text/html", key=f"{key}_html", use_container_width=True)
-        c3.download_button("CSV", csv_bytes, file_name=f"{slug}.csv", mime="text/csv", key=f"{key}_csv", use_container_width=True)
-        c4.download_button("Texto", text_bytes, file_name=f"{slug}.txt", mime="text/plain", key=f"{key}_txt", use_container_width=True)
-        ui_caption("PNG para insertar como imagen; HTML para un bloque libre del administrador; CSV y texto para edición.")
+    fingerprint = _table_fingerprint(frame, title, file_name)
+    state_prefix = f"{key}_{fingerprint}"
+    ready_key = f"{state_prefix}_ready"
+    payload_key = f"{state_prefix}_payload"
+    ready = bool(st.session_state.get(ready_key))
 
+    with st.expander("Exportar esta tabla", expanded=ready):
+        if not ready:
+            ui_caption("Generá los archivos cuando los necesites. El exportador conservará la tabla abierta después del clic.")
+            if st.button("Generar PNG, HTML, CSV y texto", key=f"{state_prefix}_prepare", use_container_width=True):
+                try:
+                    with st.spinner("Preparando archivos…"):
+                        st.session_state[payload_key] = _build_table_export_payload(frame, title)
+                    st.session_state[ready_key] = True
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No se pudieron preparar los archivos: {type(exc).__name__}: {exc}")
+            return
+
+        payload = st.session_state.get(payload_key)
+        if not payload:
+            try:
+                with st.spinner("Reconstruyendo archivos…"):
+                    payload = _build_table_export_payload(frame, title)
+                st.session_state[payload_key] = payload
+            except Exception as exc:
+                st.error(f"No se pudieron preparar los archivos: {type(exc).__name__}: {exc}")
+                return
+
+        c1, c2, c3, c4 = st.columns(4)
+        if payload.get("png"):
+            c1.download_button(
+                "Descargar PNG", payload["png"], file_name=f"{slug}.png", mime="image/png",
+                key=f"{state_prefix}_png", use_container_width=True,
+            )
+        else:
+            c1.button("PNG no disponible", key=f"{state_prefix}_png_disabled", disabled=True, use_container_width=True)
+        c2.download_button(
+            "Descargar HTML", payload["html_document"], file_name=f"{slug}.html", mime="text/html",
+            key=f"{state_prefix}_html", use_container_width=True,
+        )
+        c3.download_button(
+            "Descargar CSV", payload["csv"], file_name=f"{slug}.csv", mime="text/csv",
+            key=f"{state_prefix}_csv", use_container_width=True,
+        )
+        c4.download_button(
+            "Descargar texto", payload["text"], file_name=f"{slug}.txt", mime="text/plain",
+            key=f"{state_prefix}_txt", use_container_width=True,
+        )
+        if payload.get("png_error"):
+            ui_warning("El resto de los formatos está disponible, pero no se pudo construir el PNG: " + payload["png_error"])
+
+        show_html = st.checkbox("Mostrar HTML listo para pegar en el administrador", key=f"{state_prefix}_show_html")
+        if show_html:
+            st.code(payload["html_fragment"], language="html")
+            ui_caption("El ícono de copia del bloque permite llevar este fragmento directamente a un módulo de HTML libre.")
+
+        if st.button("Volver a generar", key=f"{state_prefix}_reset", use_container_width=True):
+            st.session_state.pop(payload_key, None)
+            st.session_state[ready_key] = False
+            st.rerun()
+        ui_caption("PNG para insertar como imagen; HTML para el administrador; CSV y texto para edición.")
 
 def ui_dataframe(data, *args, **kwargs):
     global _UI_TABLE_SEQUENCE
@@ -7987,19 +8065,65 @@ def lpf_previa_fecha_sim(Z, rest, pend, jugados=None, fecha=None):
     return prox, pd.DataFrame(rows)
 
 
-def lpf_que_se_juega_fecha(Z, pend, fecha=None):
-    """Un renglón editorial por equipo para la próxima ventana de partidos."""
+def lpf_que_se_juega_fecha(
+    Z, pend, fecha=None, apertura=None, camps=("", "", ""), extras=("", ""),
+    previous=None, rest=None, n_anual=1, n_prom=1,
+):
+    """Un renglón periodístico por club para la próxima ventana de partidos.
+
+    La salida combina rivales, rango de playoffs por puntos, carrera por las copas
+    y alertas de descenso. No presenta los extremos de puesto como pronósticos.
+    """
     prox, official_games, postponed = lpf_jornada_actual(pend, forzar=fecha)
     if prox is None:
         return "No quedan partidos pendientes.", None
     games = list(official_games) + [match for match, _round in postponed]
     if not games:
         return "No hay partidos en la ventana elegida.", None
+
     participants = []
     for match in games:
         for team in match:
             if team not in participants:
                 participants.append(team)
+
+    rest = rest or {}
+    annual = lpf_anual_base(Z, apertura or {}) if Z else {}
+    allocation = lpf_plazas_copas(Z, apertura or {}, camps or ("", "", ""), extras or ("", "")) if annual else {}
+    fixed_routes = {
+        team: motive for team, motive in allocation.get("lib", [])
+        if "por Tabla General" not in str(motive)
+    }
+    eligible = [team for team in allocation.get("orden", []) if team not in fixed_routes and team in annual]
+    eligible_base = {team: annual[team] for team in eligible}
+    n_lib = int(allocation.get("n_tabla_lib", 0))
+    cup_end = n_lib + 6
+    annual_table = liga_tabla_df(annual) if annual else pd.DataFrame()
+    annual_positions = {
+        row["Equipo"]: pos for pos, (_idx, row) in enumerate(annual_table.iterrows(), 1)
+    } if not annual_table.empty else {}
+
+    average_positions = {}
+    average_danger_from = None
+    if annual and previous:
+        try:
+            avg = promedios_df(annual, rest, previous)
+            average_positions = {row["Equipo"]: int(row["Pos"]) for _, row in avg.iterrows()}
+            average_danger_from = max(1, len(avg) - max(1, int(n_prom)) + 1)
+        except Exception:
+            average_positions = {}
+            average_danger_from = None
+
+    def _clean_route(route):
+        return re.sub(r"\s*\(art\.[^)]+\)", "", str(route or "")).strip()
+
+    def _word_number(value):
+        words = {1: "un", 2: "dos", 3: "tres", 4: "cuatro", 5: "cinco", 6: "seis", 7: "siete", 8: "ocho", 9: "nueve", 10: "diez"}
+        return words.get(int(value), str(value))
+
+    def _range(best, worst):
+        return _ord(best) if best == worst else f"{_ord(best)}–{_ord(worst)}"
+
     lines = []
     rows = []
     for team in participants:
@@ -8014,42 +8138,132 @@ def lpf_que_se_juega_fecha(Z, pend, fecha=None):
         current = int(hit[0] + 1)
         zone_games = [match for match in games if match[0] in base or match[1] in base]
         bounds = scenario_rank_bounds(base, zone_games, team)
+        appearances = sum(team in match for match in games)
+        rivals = [visitor if local == team else local for local, visitor in games if team in (local, visitor)]
+        rivals_display = [display_team(rival) for rival in rivals]
+        if appearances == 1:
+            schedule = f"{display_team(team)} juega ante {rivals_display[0]}"
+        elif appearances == 2:
+            schedule = f"{display_team(team)} juega dos veces, ante {rivals_display[0]} y {rivals_display[1]}"
+        else:
+            schedule = f"{display_team(team)} juega {appearances} veces, ante " + ", ".join(rivals_display[:-1]) + f" y {rivals_display[-1]}"
+
         if not bounds.get("available"):
-            line = f"{display_team(team)}: no tiene un rango confirmado para esta ventana."
+            playoff_text = "No tiene un rango de playoffs confirmado para esta ventana."
+            best = worst = None
         else:
             best = int(bounds["best_rank"])
             worst = int(bounds["worst_rank"])
-            appearances = sum(team in match for match in games)
+            rank_text = _range(best, worst)
             if current <= _LPF_TOP_OCTAVOS and worst <= _LPF_TOP_OCTAVOS:
-                action = "ya tiene asegurado cerrar la ventana entre los ocho primeros"
-                if current == 1:
-                    detail = f"puede conservar la punta y caer como máximo al {_ord(worst)}"
-                elif best == 1:
-                    detail = f"puede alcanzar la punta y caer como máximo al {_ord(worst)}"
-                else:
-                    detail = f"puede quedar entre {_ord(best)} y {_ord(worst)}"
+                playoff_text = f"Ya aseguró cerrar entre los ocho; puede quedar {rank_text} por puntos."
             elif current <= _LPF_TOP_OCTAVOS:
-                action = "se juega sostenerse en zona de playoffs"
-                detail = f"puede quedar entre {_ord(best)} y {_ord(worst)}, con escenarios adentro y afuera"
+                playoff_text = f"Puede sostenerse o salir de playoffs; su rango es {rank_text} por puntos."
             elif best <= _LPF_TOP_OCTAVOS:
-                action = "se juega entrar en zona de playoffs"
-                detail = f"puede quedar entre {_ord(best)} y {_ord(worst)}, con escenarios adentro y afuera"
+                playoff_text = f"Puede entrar a playoffs o seguir afuera; su rango es {rank_text} por puntos."
             else:
-                action = "busca acercarse a los puestos de playoffs"
-                detail = f"aun con la mejor combinación, su mejor puesto es {_ord(best)}"
-            double_note = " y juega dos veces" if appearances > 1 else ""
-            line = f"{display_team(team)} {action}{double_note}: {detail}."
+                playoff_text = f"No puede entrar a playoffs en esta ventana; su mejor puesto por puntos es {_ord(best)}."
+
+        cup_text = ""
+        cup_material = False
+        direct_route = fixed_routes.get(team, "")
+        if direct_route:
+            cup_text = f"Ya está clasificado a las copas por {_clean_route(direct_route)}."
+            cup_material = True
+        elif team in eligible_base:
+            cup_bounds = scenario_rank_bounds(eligible_base, games, team)
+            if cup_bounds.get("available"):
+                cbest, cworst = int(cup_bounds["best_rank"]), int(cup_bounds["worst_rank"])
+                current_eligible = 1 + sum(
+                    1 for rival in eligible_base
+                    if rival != team and int(eligible_base[rival].get("pts", 0)) > int(eligible_base[team].get("pts", 0))
+                )
+                if n_lib and cworst <= n_lib:
+                    cup_text = "Asegura cerrar la ventana en zona de Libertadores entre los equipos elegibles."
+                    cup_material = True
+                elif n_lib and cbest <= n_lib:
+                    if cworst <= cup_end:
+                        cup_text = "Puede quedar en zona de Libertadores o Sudamericana entre los elegibles."
+                    else:
+                        cup_text = "Puede quedar en Libertadores, Sudamericana o fuera de los cupos."
+                    cup_material = True
+                elif cbest <= cup_end:
+                    if cworst <= cup_end:
+                        cup_text = "Asegura cerrar al menos en zona de Sudamericana entre los elegibles."
+                    else:
+                        cup_text = "Puede entrar a una copa o quedar afuera de los cupos."
+                    cup_material = True
+                elif current_eligible <= cup_end + 2 or cbest <= cup_end + 1:
+                    cup_text = f"Sigue fuera de los cupos; su mejor puesto elegible en la ventana es {_ord(cbest)}."
+                    cup_material = True
+
+        descent_parts = []
+        descent_material = False
+        if annual and team in annual:
+            annual_bounds = scenario_rank_bounds(annual, games, team)
+            danger_from = max(1, len(annual) - max(1, int(n_anual)) + 1)
+            if annual_bounds.get("available"):
+                abest, aworst = int(annual_bounds["best_rank"]), int(annual_bounds["worst_rank"])
+                current_annual = annual_positions.get(team)
+                if abest >= danger_from:
+                    descent_parts.append("Termina la ventana en zona de descenso por Tabla Anual")
+                    descent_material = True
+                elif aworst >= danger_from:
+                    if current_annual and current_annual >= danger_from:
+                        descent_parts.append("Puede salir o seguir en zona de descenso por Tabla Anual")
+                    else:
+                        descent_parts.append("Puede caer en zona de descenso por Tabla Anual")
+                    descent_material = True
+                elif current_annual and current_annual >= danger_from - 2:
+                    descent_parts.append("Sigue cerca de la zona de descenso por Tabla Anual")
+                    descent_material = True
+        avg_pos = average_positions.get(team)
+        if avg_pos and average_danger_from:
+            if avg_pos >= average_danger_from:
+                descent_parts.append("está en zona de descenso por promedios")
+                descent_material = True
+            elif avg_pos >= average_danger_from - 2:
+                descent_parts.append("tiene margen corto en los promedios")
+                descent_material = True
+        descent_text = "; ".join(descent_parts)
+        if descent_text:
+            descent_text = descent_text[:1].upper() + descent_text[1:] + "."
+
+        sentences = [schedule + ".", playoff_text]
+        if cup_material and cup_text:
+            sentences.append(cup_text)
+        if descent_material and descent_text:
+            sentences.append(descent_text)
+        line = " ".join(sentences)
         lines.append(line)
-        rows.append({"Equipo": team, "Qué se juega": line.split(": ", 1)[-1]})
+        rows.append({
+            "Equipo": display_team(team),
+            "Partidos": appearances,
+            "Rivales": " · ".join(rivals_display),
+            "Playoffs": playoff_text.rstrip("."),
+            "Copas": cup_text.rstrip(".") if cup_material else "Sin cambio decisivo en esta ventana",
+            "Descenso": descent_text.rstrip(".") if descent_material else "Sin alerta inmediata en esta ventana",
+            "Renglón reutilizable": line,
+        })
+
     frame = pd.DataFrame(rows)
     if not frame.empty:
         frame.attrs["export_title"] = f"Qué se juega cada equipo · Fecha {prox}"
         frame.attrs["export_name"] = f"que_se_juega_fecha_{prox}"
         frame.attrs["reusable_line"] = "\n".join(lines)
+
     heading = f"### Qué se juega cada equipo · Fecha {prox}"
     if postponed:
-        heading += f" y {len(postponed)} postergado(s)"
-    return heading + "\n\n" + "\n\n".join(f"- {line}" for line in lines), frame
+        rounds = sorted({round_number for _match, round_number in postponed if round_number is not None})
+        count_text = _word_number(len(postponed))
+        noun = "partido pendiente" if len(postponed) == 1 else "partidos pendientes"
+        if len(rounds) == 1:
+            heading += f" y {count_text} {noun} de la Fecha {rounds[0]}"
+        else:
+            heading += f" y {count_text} {noun} de fechas anteriores"
+    intro = ("Los puestos son rangos exactos por puntos dentro de esta ventana; no son pronósticos y, "
+             "si hay igualdad, contemplan tanto el desempate favorable como el adverso.")
+    return heading + "\n\n" + intro + "\n\n" + "\n\n".join(f"- {line}" for line in lines), frame
 
 
 def lpf_previa_fecha_narrativa(
@@ -9092,7 +9306,10 @@ def _router_lpf(acc, E):
             return [("md", lpf_relato_zona_texto(Z, lab, rest))] if lab else [("warning", f"No encuentro a {equipo}.")]
         return [("md", lpf_relato_zona_texto(Z, l, rest)) for l in sorted(Z)]
     if intent == "juega" and not equipo:
-        txt, frame = lpf_que_se_juega_fecha(Z, pend)
+        txt, frame = lpf_que_se_juega_fecha(
+            Z, pend, apertura=ap, camps=(c1, c2, c3), extras=(xl, xs),
+            previous=prev, rest=rest, n_anual=na, n_prom=npro,
+        )
         if frame is None:
             return [("info", txt)]
         return [("md", txt), ("df", frame, "Qué se juega cada equipo")]
