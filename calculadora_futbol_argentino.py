@@ -1,7 +1,7 @@
 """
 ⚽ Calculadora de escenarios — LPF 2026
 Convertido de Jupyter Notebook (v2) a Streamlit
-Actualización 3.7.3: recuperación transaccional de resultados y respaldo completo hasta la Fecha 3.
+Actualización 3.7.4: tablas contextuales, exportación editorial y renglones reutilizables.
 """
 
 import streamlit as st
@@ -37,8 +37,128 @@ _ST_GRAPHVIZ = st.graphviz_chart
 def ui_markdown(body, *args, **kwargs):
     return _ST_MARKDOWN(editorialize_text(body), *args, **kwargs)
 
+_UI_TABLE_SEQUENCE = 0
+
+
+def _safe_export_name(value):
+    text = editorialize_text(str(value or "tabla")).strip().lower()
+    text = re.sub(r"[^a-z0-9áéíóúüñ]+", "_", text, flags=re.IGNORECASE).strip("_")
+    return text or "tabla"
+
+
+def _table_html_document(frame, title):
+    import html
+
+    safe_title = html.escape(editorialize_text(str(title or "Tabla")))
+    table_html = frame.to_html(index=False, border=0, classes="tabla-editorial", escape=True)
+    return f'''<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{safe_title}</title>
+<style>
+.tabla-editorial-wrap {{max-width:100%; overflow-x:auto; font-family:Arial,Helvetica,sans-serif; color:#202124;}}
+.tabla-editorial-title {{font-size:20px; font-weight:700; margin:0 0 12px;}}
+table.tabla-editorial {{border-collapse:collapse; width:100%; font-size:14px; line-height:1.35;}}
+table.tabla-editorial th {{background:#f1f3f4; text-align:left; font-weight:700; padding:9px 10px; border:1px solid #d9dde3;}}
+table.tabla-editorial td {{padding:9px 10px; border:1px solid #d9dde3; vertical-align:top;}}
+table.tabla-editorial tbody tr:nth-child(even) {{background:#fafafa;}}
+</style>
+</head>
+<body>
+<div class="tabla-editorial-wrap">
+<div class="tabla-editorial-title">{safe_title}</div>
+{table_html}
+</div>
+</body>
+</html>'''
+
+
+@st.cache_data(show_spinner=False)
+def _table_png_bytes(frame, title):
+    import textwrap
+    from io import BytesIO
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    visible = frame.copy().fillna("")
+    visible.columns = [str(col) for col in visible.columns]
+    for col in visible.columns:
+        visible[col] = visible[col].map(
+            lambda value: "\n".join(textwrap.wrap(str(value), 34)) if len(str(value)) > 34 else str(value)
+        )
+    nrows, ncols = visible.shape
+    longest = max([len(str(x)) for x in visible.columns] + [len(str(x)) for x in visible.astype(str).to_numpy().ravel()] + [8])
+    fig_w = min(22, max(8, 1.45 * max(1, ncols) + min(8, longest / 18)))
+    fig_h = min(38, max(2.8, 0.58 * (nrows + 1) + 1.2))
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=180)
+    ax.axis("off")
+    ax.set_title(editorialize_text(str(title or "Tabla")), loc="left", fontsize=15, fontweight="bold", pad=14)
+    table = ax.table(
+        cellText=visible.values,
+        colLabels=visible.columns,
+        cellLoc="left",
+        colLoc="left",
+        loc="upper left",
+        bbox=[0, 0, 1, 0.94],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8.5 if ncols >= 7 else 9.5)
+    table.auto_set_column_width(col=list(range(max(1, ncols))))
+    for (row, _col), cell in table.get_celld().items():
+        cell.set_linewidth(0.45)
+        if row == 0:
+            cell.set_text_props(fontweight="bold")
+    buf = BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white", pad_inches=0.18)
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def _render_table_exports(frame, title, file_name, key):
+    title = editorialize_text(str(title or "Tabla"))
+    slug = _safe_export_name(file_name or title)
+    ready_key = f"{key}_ready"
+    with st.expander("Exportar esta tabla", expanded=False):
+        if st.button("Preparar archivos", key=f"{key}_prepare", use_container_width=True):
+            st.session_state[ready_key] = True
+        if not st.session_state.get(ready_key):
+            ui_caption("Prepará los archivos sólo cuando los necesites; así las tablas grandes no vuelven lenta la pantalla.")
+            return
+        html_doc = _table_html_document(frame, title)
+        csv_bytes = frame.to_csv(index=False, sep=";").encode("utf-8-sig")
+        text_bytes = frame.to_csv(index=False, sep="\t").encode("utf-8")
+        png_bytes = _table_png_bytes(frame, title)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.download_button("PNG", png_bytes, file_name=f"{slug}.png", mime="image/png", key=f"{key}_png", use_container_width=True)
+        c2.download_button("HTML", html_doc.encode("utf-8"), file_name=f"{slug}.html", mime="text/html", key=f"{key}_html", use_container_width=True)
+        c3.download_button("CSV", csv_bytes, file_name=f"{slug}.csv", mime="text/csv", key=f"{key}_csv", use_container_width=True)
+        c4.download_button("Texto", text_bytes, file_name=f"{slug}.txt", mime="text/plain", key=f"{key}_txt", use_container_width=True)
+        ui_caption("PNG para insertar como imagen; HTML para un bloque libre del administrador; CSV y texto para edición.")
+
+
 def ui_dataframe(data, *args, **kwargs):
-    return _ST_DATAFRAME(editorialize_frame(data), *args, **kwargs)
+    global _UI_TABLE_SEQUENCE
+    exportable = bool(kwargs.pop("exportable", True))
+    export_title = kwargs.pop("export_title", None)
+    export_name = kwargs.pop("export_name", None)
+    original_attrs = dict(getattr(data, "attrs", {}) or {})
+    frame = editorialize_frame(data)
+    if hasattr(frame, "attrs"):
+        frame.attrs.update(original_attrs)
+    result = _ST_DATAFRAME(frame, *args, **kwargs)
+    if exportable and isinstance(frame, pd.DataFrame) and not frame.empty:
+        _UI_TABLE_SEQUENCE += 1
+        title = export_title or frame.attrs.get("export_title") or "Tabla"
+        name = export_name or frame.attrs.get("export_name") or title
+        _render_table_exports(frame, title, name, key=f"tabla_export_{_UI_TABLE_SEQUENCE}")
+    reusable = frame.attrs.get("reusable_line") if hasattr(frame, "attrs") else None
+    if reusable:
+        ui_markdown("**Renglón reutilizable**")
+        st.code(editorialize_text(str(reusable)), language="text")
+    return result
 
 def ui_info(body, *args, **kwargs):
     return _ST_INFO(editorialize_text(body), *args, **kwargs)
@@ -7867,6 +7987,71 @@ def lpf_previa_fecha_sim(Z, rest, pend, jugados=None, fecha=None):
     return prox, pd.DataFrame(rows)
 
 
+def lpf_que_se_juega_fecha(Z, pend, fecha=None):
+    """Un renglón editorial por equipo para la próxima ventana de partidos."""
+    prox, official_games, postponed = lpf_jornada_actual(pend, forzar=fecha)
+    if prox is None:
+        return "No quedan partidos pendientes.", None
+    games = list(official_games) + [match for match, _round in postponed]
+    if not games:
+        return "No hay partidos en la ventana elegida.", None
+    participants = []
+    for match in games:
+        for team in match:
+            if team not in participants:
+                participants.append(team)
+    lines = []
+    rows = []
+    for team in participants:
+        lab = lpf_zona_de_equipo(team, Z)
+        base = (Z or {}).get(lab or "", {})
+        if not base or team not in base:
+            continue
+        table = liga_tabla_df(base)
+        hit = table.index[table["Equipo"] == team].tolist()
+        if not hit:
+            continue
+        current = int(hit[0] + 1)
+        zone_games = [match for match in games if match[0] in base or match[1] in base]
+        bounds = scenario_rank_bounds(base, zone_games, team)
+        if not bounds.get("available"):
+            line = f"{display_team(team)}: no tiene un rango confirmado para esta ventana."
+        else:
+            best = int(bounds["best_rank"])
+            worst = int(bounds["worst_rank"])
+            appearances = sum(team in match for match in games)
+            if current <= _LPF_TOP_OCTAVOS and worst <= _LPF_TOP_OCTAVOS:
+                action = "ya tiene asegurado cerrar la ventana entre los ocho primeros"
+                if current == 1:
+                    detail = f"puede conservar la punta y caer como máximo al {_ord(worst)}"
+                elif best == 1:
+                    detail = f"puede alcanzar la punta y caer como máximo al {_ord(worst)}"
+                else:
+                    detail = f"puede quedar entre {_ord(best)} y {_ord(worst)}"
+            elif current <= _LPF_TOP_OCTAVOS:
+                action = "se juega sostenerse en zona de playoffs"
+                detail = f"puede quedar entre {_ord(best)} y {_ord(worst)}, con escenarios adentro y afuera"
+            elif best <= _LPF_TOP_OCTAVOS:
+                action = "se juega entrar en zona de playoffs"
+                detail = f"puede quedar entre {_ord(best)} y {_ord(worst)}, con escenarios adentro y afuera"
+            else:
+                action = "busca acercarse a los puestos de playoffs"
+                detail = f"aun con la mejor combinación, su mejor puesto es {_ord(best)}"
+            double_note = " y juega dos veces" if appearances > 1 else ""
+            line = f"{display_team(team)} {action}{double_note}: {detail}."
+        lines.append(line)
+        rows.append({"Equipo": team, "Qué se juega": line.split(": ", 1)[-1]})
+    frame = pd.DataFrame(rows)
+    if not frame.empty:
+        frame.attrs["export_title"] = f"Qué se juega cada equipo · Fecha {prox}"
+        frame.attrs["export_name"] = f"que_se_juega_fecha_{prox}"
+        frame.attrs["reusable_line"] = "\n".join(lines)
+    heading = f"### Qué se juega cada equipo · Fecha {prox}"
+    if postponed:
+        heading += f" y {len(postponed)} postergado(s)"
+    return heading + "\n\n" + "\n\n".join(f"- {line}" for line in lines), frame
+
+
 def lpf_previa_fecha_narrativa(
     Z, rest, pend, jugados=None, fecha=None, partido=None,
     apertura=None, camps=("", "", ""), extras=("", ""), previous=None,
@@ -8175,8 +8360,123 @@ def _ord(p):
     return f"{p}º"
 
 
-def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None, scope="next_team_match"):
-    """Previa exacta del próximo partido real o de una ventana elegida."""
+def _preview_objective(value):
+    text = str(value or "Playoffs").strip().lower()
+    if "desc" in text:
+        return "descenso"
+    if "libert" in text:
+        return "libertadores"
+    if "sud" in text or "copa" in text:
+        return "copas"
+    return "playoffs"
+
+
+def _preview_cup_context(Z, annual):
+    E = st.session_state.get("ESTADO") or {}
+    opening = E.get("apertura") or {}
+    camps = E.get("camps") or (
+        st.session_state.get("lpf_c1", "Belgrano"),
+        st.session_state.get("lpf_c2", ""),
+        st.session_state.get("lpf_c3", ""),
+    )
+    extras = E.get("intl") or (
+        st.session_state.get("lpf_xl", ""),
+        st.session_state.get("lpf_xs", ""),
+    )
+    allocation = lpf_plazas_copas(Z, opening, camps, extras)
+    fixed_routes = {
+        team: motive
+        for team, motive in allocation.get("lib", [])
+        if "por Tabla General" not in str(motive)
+    }
+    eligible = [team for team in allocation.get("orden", []) if team not in fixed_routes and team in annual]
+    return allocation, fixed_routes, eligible
+
+
+def _scenario_range_text(scenario):
+    best, worst = scenario.get("best_rank"), scenario.get("worst_rank")
+    if not best or not worst:
+        return "—"
+    return _ord(best) if best == worst else f"{_ord(best)}–{_ord(worst)}"
+
+
+def _cup_scenario_reading(scenario, n_lib):
+    best, worst = scenario.get("best_rank"), scenario.get("worst_rank")
+    if not best or not worst:
+        return "No se pudo establecer el rango entre los equipos elegibles."
+    lib_end = max(0, int(n_lib))
+    cup_end = lib_end + 6
+    if lib_end and worst <= lib_end:
+        return "Termina en zona de Libertadores entre los equipos elegibles."
+    if lib_end and best <= lib_end:
+        if worst <= cup_end:
+            return "Puede quedar en Libertadores o Sudamericana."
+        return "Puede entrar a Libertadores o Sudamericana, pero también quedar afuera."
+    if best <= cup_end:
+        if worst <= cup_end:
+            return "Termina al menos en zona de Sudamericana."
+        return "Puede entrar a una copa o quedar afuera."
+    return "Queda fuera de los cupos por Tabla General en esta ventana."
+
+
+def _descent_scenario_reading(scenario, total_teams, n_annual):
+    best, worst = scenario.get("best_rank"), scenario.get("worst_rank")
+    if not best or not worst:
+        return "No se pudo establecer el rango de la Tabla Anual."
+    danger_from = max(1, int(total_teams) - max(1, int(n_annual)) + 1)
+    if worst < danger_from:
+        return "Continúa fuera de la zona de descenso por Tabla Anual."
+    if best >= danger_from:
+        return "Termina en la zona de descenso por Tabla Anual."
+    return "Puede seguir afuera o caer en la zona de descenso por Tabla Anual."
+
+
+def _zone_scenario_short(scenario):
+    best, worst = scenario.get("best_rank"), scenario.get("worst_rank")
+    rng = _scenario_range_text(scenario)
+    if scenario.get("can_enter") and not scenario.get("can_fail"):
+        return f"queda {rng}, siempre dentro de los ocho"
+    if scenario.get("can_enter") and scenario.get("can_fail"):
+        return f"puede quedar {rng} y también salir de los ocho"
+    if best:
+        return f"sigue afuera; su mejor puesto es {_ord(best)}"
+    return "no tiene un rango confirmado"
+
+
+def _preview_reusable_line(team, objective, zone_scenarios, annual_scenarios=None,
+                           direct_route="", n_lib=0, total_teams=30, n_annual=1,
+                           current_zone_rank=None):
+    def lower_initial(value):
+        text = str(value or "").rstrip(".")
+        return text[:1].lower() + text[1:] if text else text
+
+    shown = display_team(team)
+    labels = ("gana", "empata", "pierde")
+    if objective == "descenso" and annual_scenarios:
+        parts = [
+            f"si {label}, {lower_initial(_descent_scenario_reading(row, total_teams, n_annual))}"
+            for label, row in zip(labels, annual_scenarios)
+        ]
+        return f"{shown} se juega su situación en la Tabla Anual: " + "; ".join(parts) + "."
+    if objective in ("copas", "libertadores"):
+        if direct_route:
+            route = re.sub(r"\s*\(art\.[^)]+\)", "", str(direct_route)).strip()
+            return (f"{shown} ya tiene asegurada su plaza internacional como {lower_initial(route)}; "
+                    "su resultado mueve su puesto en la Tabla Anual y puede modificar el corte para los demás.")
+        if annual_scenarios:
+            parts = [
+                f"si {label}, {lower_initial(_cup_scenario_reading(row, n_lib))}"
+                for label, row in zip(labels, annual_scenarios)
+            ]
+            return f"{shown} se juega su lugar en las copas: " + "; ".join(parts) + "."
+    purpose = "sostenerse en zona de playoffs" if current_zone_rank and current_zone_rank <= 8 else "entrar en zona de playoffs"
+    parts = [f"si {label}, {_zone_scenario_short(row)}" for label, row in zip(labels, zone_scenarios)]
+    return f"{shown} se juega {purpose}: " + "; ".join(parts) + "."
+
+
+def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None,
+                             scope="next_team_match", objective="Playoffs"):
+    """Previa exacta con tabla contextual para playoffs, copas o descenso."""
     lab = lpf_zona_de_equipo(equipo, Z)
     if not lab or equipo not in Z.get(lab, {}):
         return None, None
@@ -8222,12 +8522,15 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None, scop
 
     rows = []
     zone_scenarios = exact_result_scenarios(Z[lab], games, equipo, own_match, _LPF_TOP_OCTAVOS)
+    zone_table = liga_tabla_df(Z[lab])
+    current_zone_rank = int(zone_table.index[zone_table["Equipo"] == equipo][0] + 1)
+    result_column = "Si River" if equipo == "River Plate" else f"Si {equipo}"
     for scenario in zone_scenarios:
         points = (str(scenario["points_min"]) if scenario["points_min"] == scenario["points_max"]
                   else f"{scenario['points_min']}–{scenario['points_max']}")
         rows.append({
             "Tabla": f"Playoffs · Zona {lab}",
-            "Si River" if equipo == "River Plate" else f"Si {equipo}": scenario["result"].lower(),
+            result_column: scenario["result"].lower(),
             "Puntos al cierre": points,
             "Mejor puesto": _ord(scenario["best_rank"]) if scenario["best_rank"] else "—",
             "Peor puesto": _ord(scenario["worst_rank"]) if scenario["worst_rank"] else "—",
@@ -8236,19 +8539,57 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None, scop
                           "; no puede salir" if scenario["can_enter"] and not scenario["can_fail"] else ""),
         })
 
+    mode = _preview_objective(objective)
+    annual_scenarios = None
+    direct_route = ""
+    n_lib = 0
     if anual and equipo in anual:
-        annual_scenarios = exact_result_scenarios(anual, games, equipo, own_match, len(anual))
-        for scenario in annual_scenarios:
-            points = (str(scenario["points_min"]) if scenario["points_min"] == scenario["points_max"]
-                      else f"{scenario['points_min']}–{scenario['points_max']}")
-            rows.append({
-                "Tabla": "Tabla Anual general",
-                "Si River" if equipo == "River Plate" else f"Si {equipo}": scenario["result"].lower(),
-                "Puntos al cierre": points,
-                "Mejor puesto": _ord(scenario["best_rank"]) if scenario["best_rank"] else "—",
-                "Peor puesto": _ord(scenario["worst_rank"]) if scenario["worst_rank"] else "—",
-                "Lectura": "Rango general; la tabla efectiva de copas excluye a los campeones ya clasificados",
-            })
+        if mode == "descenso":
+            annual_scenarios = exact_result_scenarios(anual, games, equipo, own_match, len(anual))
+            n_annual = int((st.session_state.get("ESTADO") or {}).get("n_anual", 1))
+            for scenario in annual_scenarios:
+                points = (str(scenario["points_min"]) if scenario["points_min"] == scenario["points_max"]
+                          else f"{scenario['points_min']}–{scenario['points_max']}")
+                rows.append({
+                    "Tabla": "Descenso · Tabla Anual",
+                    result_column: scenario["result"].lower(),
+                    "Puntos al cierre": points,
+                    "Mejor puesto": _ord(scenario["best_rank"]) if scenario["best_rank"] else "—",
+                    "Peor puesto": _ord(scenario["worst_rank"]) if scenario["worst_rank"] else "—",
+                    "Lectura": _descent_scenario_reading(scenario, len(anual), n_annual),
+                })
+        else:
+            allocation, fixed_routes, eligible = _preview_cup_context(Z, anual)
+            n_lib = int(allocation.get("n_tabla_lib", 0))
+            direct_route = fixed_routes.get(equipo, "")
+            if direct_route:
+                annual_scenarios = exact_result_scenarios(anual, games, equipo, own_match, len(anual))
+                route = re.sub(r"\s*\(art\.[^)]+\)", "", str(direct_route)).strip()
+                for scenario in annual_scenarios:
+                    points = (str(scenario["points_min"]) if scenario["points_min"] == scenario["points_max"]
+                              else f"{scenario['points_min']}–{scenario['points_max']}")
+                    rows.append({
+                        "Tabla": "Tabla Anual · plaza directa",
+                        result_column: scenario["result"].lower(),
+                        "Puntos al cierre": points,
+                        "Mejor puesto": _ord(scenario["best_rank"]) if scenario["best_rank"] else "—",
+                        "Peor puesto": _ord(scenario["worst_rank"]) if scenario["worst_rank"] else "—",
+                        "Lectura": f"Ya clasificado por otra vía: {route}. Su puesto en la Anual no define su plaza.",
+                    })
+            elif equipo in eligible:
+                eligible_base = {team: anual[team] for team in eligible}
+                annual_scenarios = exact_result_scenarios(eligible_base, games, equipo, own_match, len(eligible_base))
+                for scenario in annual_scenarios:
+                    points = (str(scenario["points_min"]) if scenario["points_min"] == scenario["points_max"]
+                              else f"{scenario['points_min']}–{scenario['points_max']}")
+                    rows.append({
+                        "Tabla": "Copas · puestos elegibles",
+                        result_column: scenario["result"].lower(),
+                        "Puntos al cierre": points,
+                        "Mejor puesto": _ord(scenario["best_rank"]) if scenario["best_rank"] else "—",
+                        "Peor puesto": _ord(scenario["worst_rank"]) if scenario["worst_rank"] else "—",
+                        "Lectura": _cup_scenario_reading(scenario, n_lib),
+                    })
 
     win, draw, loss = zone_scenarios[0], zone_scenarios[1], zone_scenarios[2]
     if win["best_rank"] and win["best_rank"] > 1:
@@ -8265,7 +8606,17 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None, scop
     lines.append("_EXACTO POR PUNTOS · Cada partido tiene una sola salida posible: victoria local, empate o victoria visitante. "
                  "Cuando dos equipos terminan igualados, el rango incluye tanto el desempate favorable como el adverso; "
                  "no inventa marcadores futuros ni afirma quién ganará por DG, GF, mano a mano, fair play o sorteo._")
-    return "\n\n".join(lines), pd.DataFrame(rows)
+
+    n_annual = int((st.session_state.get("ESTADO") or {}).get("n_anual", 1))
+    reusable = _preview_reusable_line(
+        equipo, mode, zone_scenarios, annual_scenarios, direct_route, n_lib,
+        len(anual or {}), n_annual, current_zone_rank,
+    )
+    frame = pd.DataFrame(rows)
+    frame.attrs["export_title"] = f"{display_team(equipo)} · escenarios del próximo partido"
+    frame.attrs["export_name"] = f"{display_team(equipo)}_escenarios_proximo_partido"
+    frame.attrs["reusable_line"] = reusable
+    return "\n\n".join(lines), frame
 
 def _lpf_ctx(Z, rest, apertura, camps, extras, prom, n_anual=1, n_prom=1):
     """Precalcula todo lo estable para simular objetivos de la anual/promedios."""
@@ -8740,9 +9091,17 @@ def _router_lpf(acc, E):
             lab = lpf_zona_de_equipo(equipo, Z)
             return [("md", lpf_relato_zona_texto(Z, lab, rest))] if lab else [("warning", f"No encuentro a {equipo}.")]
         return [("md", lpf_relato_zona_texto(Z, l, rest)) for l in sorted(Z)]
+    if intent == "juega" and not equipo:
+        txt, frame = lpf_que_se_juega_fecha(Z, pend)
+        if frame is None:
+            return [("info", txt)]
+        return [("md", txt), ("df", frame, "Qué se juega cada equipo")]
     if intent in ("previa", "juega"):
         if equipo:
-            txt, dfe = lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prev, scope="next_team_match")
+            txt, dfe = lpf_previa_equipo_texto(
+                equipo, Z, rest, pend, anual, prev, scope="next_team_match",
+                objective=_objetivo_lpf(q) or "Playoffs",
+            )
             if dfe is not None:
                 return [("md", txt), ("df", dfe, f"{equipo}: cómo puede terminar la Fecha")]
         fx, dfp = lpf_previa_fecha_sim(Z, rest, pend, jugados)
@@ -9562,7 +9921,11 @@ def render_blocks(blocks, prefix="x"):
                 st.image(b[2], use_container_width=True)
             st.download_button("Descargar imagen", b[2], file_name=b[3], mime="image/png", key=f"{prefix}_dl{i}")
         elif kind == "df":
-            ui_dataframe(b[1], use_container_width=True, hide_index=True)
+            table_title = b[2] if len(b) > 2 and b[2] else "Tabla"
+            ui_dataframe(
+                b[1], use_container_width=True, hide_index=True,
+                export_title=table_title, export_name=table_title,
+            )
             if len(b) > 2 and b[2]:
                 ui_caption(b[2])
         elif kind == "html":
@@ -9977,7 +10340,7 @@ def render_newsroom(E):
             ui_warning(f"⚠️ **{team} tiene {_con_atraso[team]} partido(s) pendiente(s) de fechas anteriores.** "
                        f"Jugó menos que el resto: su lugar en la tabla se lee con esa salvedad (puede sumar de más) "
                        f"y su promedio se calcula sobre los partidos que le corresponden.")
-        preview_text, preview_df = lpf_previa_equipo_texto(team, Z, rest, pending, annual, previous, fecha=_sel, scope="next_team_match")
+        preview_text, preview_df = lpf_previa_equipo_texto(team, Z, rest, pending, annual, previous, fecha=_sel, scope="next_team_match", objective=objective)
         if preview_text:
             ui_info(preview_text)
         if preview_df is not None:
@@ -10498,7 +10861,15 @@ def render_scenarios_workspace(E, default_team=None, embedded=False):
             "Sólo postergados": "postponed_only",
             "Fecha + postergados": "extended_window",
         }[scope_label]
-        text, frame = lpf_previa_equipo_texto(team, Z, rest, pending, annual, previous, scope=scope)
+        preview_objective = st.radio(
+            "Lectura complementaria",
+            ["Playoffs", "Libertadores", "Al menos Sudamericana", "Descenso"],
+            horizontal=True,
+            key=f"scenario_result_objective_{team}",
+        )
+        text, frame = lpf_previa_equipo_texto(
+            team, Z, rest, pending, annual, previous, scope=scope, objective=preview_objective
+        )
         if text:
             ui_markdown(text)
         if frame is not None:
@@ -10893,7 +11264,7 @@ def render_guided_workspace(E):
         ui_markdown(ficha_liga_texto(team, Z[lab], rest, pending, LPF_ZONAS_PLAYOFF))
         ui_markdown("### Próximo partido")
         _preview_text, _preview_frame = lpf_previa_equipo_texto(
-            team, Z, rest, pending, annual, previous, scope="next_team_match"
+            team, Z, rest, pending, annual, previous, scope="next_team_match", objective=objective
         )
         if _preview_text:
             ui_markdown(_preview_text)
@@ -10953,7 +11324,7 @@ def render_guided_workspace(E):
                 Z, rest, E.get("apertura") or {}, previous, E.get("n_anual", 1), E.get("n_prom", 1)
             ))
     elif task == "Cómo puede terminar el próximo partido o la fecha":
-        text, frame = lpf_previa_equipo_texto(team, Z, rest, pending, annual, previous, scope=scope)
+        text, frame = lpf_previa_equipo_texto(team, Z, rest, pending, annual, previous, scope=scope, objective=objective)
         if text: ui_markdown(text)
         if frame is not None: ui_dataframe(frame, use_container_width=True, hide_index=True)
     elif task == "Qué necesita para alcanzar el objetivo":
