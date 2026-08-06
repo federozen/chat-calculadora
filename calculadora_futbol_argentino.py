@@ -1,7 +1,7 @@
 """
 ⚽ Calculadora de escenarios — LPF 2026
 Convertido de Jupyter Notebook (v2) a Streamlit
-Actualización 3.7.7: actualización sin caché vieja y conciliación incremental de resultados.
+Actualización 3.7.8: fuentes parciales reutilizables y respaldo offline de la fecha 2.
 """
 
 import streamlit as st
@@ -2246,7 +2246,11 @@ FUTBOLARGENTINO_ANNUAL_URL = (
 )
 FUTBOLARGENTINO_RESULTS_URL = (
     "https://www.futbolargentino.com/primera-division/"
-    "clausura/resultados"
+    "resultados"
+)
+FUTBOLARGENTINO_RESULTS_URLS = (
+    FUTBOLARGENTINO_RESULTS_URL,
+    "https://www.futbolargentino.com/primera-division/clausura/resultados",
 )
 FUTBOLARGENTINO_REFERER = "https://www.futbolargentino.com/primera-division/"
 LPF_SNAPSHOT_MAX_AGE_HOURS = 168  # una semana; después obliga a revisar/cargar manualmente
@@ -2261,7 +2265,9 @@ def _source_headers(referer=""):
         ),
         "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
         "Accept-Language": "es-AR,es;q=0.9,en;q=0.7",
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-cache, no-store, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
     }
     if referer:
         headers["Referer"] = referer
@@ -2671,27 +2677,56 @@ def futbolargentino_annual(timeout=30):
 def futbolargentino_fixture(zones, timeout=30):
     """Carga resultados y programación del Clausura desde FutbolArgentino.com.
 
-    El sitio publica los partidos en el HTML inicial, por lo que no hace falta
-    ejecutar un navegador. El parser filtra todo contra ``LPF_FIXTURE`` y la
-    validación exige suficientes marcadores para explicar los PJ de las zonas.
+    Se consultan las dos rutas públicas del proveedor con un parámetro que evita
+    fotos intermedias de CDN. Una fuente parcial sigue siendo útil: se valida la
+    identidad y el marcador de cada partido, pero la cobertura total se comprueba
+    después, al combinarla con ESPN y las bases ya validadas.
     """
-    html, final_url = _standings_html_get(
-        FUTBOLARGENTINO_RESULTS_URL,
-        FUTBOLARGENTINO_REFERER,
-        timeout=timeout,
-    )
-    records = parse_futbolargentino_results_html(
-        html,
-        canon_club=canon_club,
-        official_fixture=LPF_FIXTURE,
-    )
+    import time
+
+    records = []
+    final_urls = []
+    errors = []
+    stamp = int(time.time())
+    for index, source_url in enumerate(FUTBOLARGENTINO_RESULTS_URLS):
+        separator = "&" if "?" in source_url else "?"
+        fresh_url = f"{source_url}{separator}_lpf_refresh={stamp + index}"
+        try:
+            html, final_url = _standings_html_get(
+                fresh_url,
+                FUTBOLARGENTINO_REFERER,
+                timeout=timeout,
+            )
+            parsed = parse_futbolargentino_results_html(
+                html,
+                canon_club=canon_club,
+                official_fixture=LPF_FIXTURE,
+            )
+            records.extend(parsed)
+            final_urls.append(final_url)
+        except Exception as exc:
+            errors.append(f"{source_url}: {exc}")
+
+    if not records:
+        raise RuntimeError("; ".join(errors[:2]) or "no se obtuvieron partidos")
+
+    # No exigir aquí que una sola respuesta explique todos los PJ: durante una
+    # actualización el sitio puede servir 42, 43 y 44 partidos desde nodos CDN
+    # distintos. El reconciliador transaccional decide después si la combinación
+    # completa reproduce exactamente PJ, puntos, GF, GC y DG.
     records = validate_fixture_records(
         records,
         official_fixture=LPF_FIXTURE,
-        expected_played=expected_played_count(zones),
+        expected_played=None,
     )
     played, pending = played_pending_from_records(records)
-    return played, pending, final_url
+    expected = expected_played_count(zones)
+    if expected is not None and len(played) > expected:
+        raise RuntimeError(
+            f"la fuente devolvió {len(played)} resultados, más que los {expected} "
+            "partidos implícitos en las zonas"
+        )
+    return played, pending, " · ".join(dict.fromkeys(final_urls))
 
 
 def _snapshot_path():
@@ -6448,7 +6483,9 @@ Sarmiento 2-1 Independiente Rivadavia Mza.
 Platense 0-4 Talleres
 Vélez 1-0 Independiente
 Huracán 0-0 Atlético Tucumán
-Central Córdoba 1-0 San Lorenzo"""
+Central Córdoba 1-0 San Lorenzo
+Boca 1-0 Estudiantes
+Tigre 0-0 Belgrano"""
 
 def parse_resultados_lpf(text=None, canon=None):
     """Parsea líneas «Local G1-G2 Visita» → lista de tuplas (local, visita, gl, gv)
