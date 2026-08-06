@@ -1,3 +1,11 @@
+## 3.7.6 · 2026-08-06
+
+- Conectó la página de resultados de FutbolArgentino.com al actualizador automático; el parser ya existía, pero no se utilizaba desde la interfaz.
+- Mantiene ESPN como segunda fuente y combina fotos parciales sin inferir partidos por los PJ.
+- La actualización ahora sólo acepta marcadores que reconstruyan exactamente PJ, puntos, GF, GC y DG de las dos zonas.
+- Si ninguna combinación coincide, conserva la última base válida y muestra los errores de cada proveedor.
+- No incorporó Playwright: la fuente elegida entrega los resultados en el HTML inicial y funciona con `requests` + BeautifulSoup.
+
 ## 3.5.4
 
 - Conservó sin cambios las funciones del panorama individual de playoffs, Libertadores y Sudamericana.

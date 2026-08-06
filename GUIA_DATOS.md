@@ -53,11 +53,15 @@ Revisar:
 
 1. Cargar la fuente nueva.
 2. Abrir Datos y auditoría.
-3. Comparar equipos, PJ y pendientes.
+3. Comparar equipos, PJ, puntos, goles y pendientes.
 4. Corregir aliases o marcadores faltantes.
 5. Reconciliar.
 6. Volver al Explorador.
 7. Descargar un respaldo antes de una carga masiva.
+
+La actualización automática coteja los resultados de ESPN y FutbolArgentino.com. Puede completar una fuente parcial con otra, pero sólo aplica la foto si los marcadores reconstruyen exactamente las estadísticas publicadas de ambas zonas. Una respuesta incompleta nunca reemplaza la última base válida.
+
+Playwright queda como alternativa futura únicamente si el proveedor deja de entregar los partidos en el HTML inicial. En la implementación actual no agrega precisión y encarece el despliegue con un navegador completo.
 
 ## Conflictos
 
