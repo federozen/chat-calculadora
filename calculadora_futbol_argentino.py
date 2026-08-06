@@ -1,7 +1,7 @@
 """
 ⚽ Calculadora de escenarios — LPF 2026
 Convertido de Jupyter Notebook (v2) a Streamlit
-Actualización 3.7.6: resultados reconciliados entre ESPN y FutbolArgentino.com.
+Actualización 3.7.7: actualización sin caché vieja y conciliación incremental de resultados.
 """
 
 import streamlit as st
@@ -2245,7 +2245,8 @@ FUTBOLARGENTINO_ANNUAL_URL = (
     "tabla-general/tabla-de-posiciones"
 )
 FUTBOLARGENTINO_RESULTS_URL = (
-    "https://www.futbolargentino.com/primera-division/resultados"
+    "https://www.futbolargentino.com/primera-division/"
+    "clausura/resultados"
 )
 FUTBOLARGENTINO_REFERER = "https://www.futbolargentino.com/primera-division/"
 LPF_SNAPSHOT_MAX_AGE_HOURS = 168  # una semana; después obliga a revisar/cargar manualmente
@@ -6519,17 +6520,44 @@ def _lpf_result_stats(played):
 
 def _lpf_results_fit_zones(zones, played):
     """Comprueba que los resultados reconstruyen exactamente las dos zonas."""
+    return not _lpf_results_mismatches(zones, played)
+
+
+def _lpf_results_mismatches(zones, played, limit=None):
+    """Detalla qué clubes no cierran entre marcadores y tabla publicada.
+
+    Devuelve filas cortas para auditoría; una lista vacía significa coincidencia
+    exacta en PJ, puntos, GF, GC y DG.
+    """
     teams = {team for base in (zones or {}).values() for team in base}
-    if any(local not in teams or visitor not in teams for local, visitor, _gl, _gv in played or []):
-        return False
+    mismatches = []
+    outsiders = sorted({
+        team
+        for local, visitor, _gl, _gv in played or []
+        for team in (canon_club(local), canon_club(visitor))
+        if team not in teams
+    })
+    if outsiders:
+        mismatches.append("clubes ajenos a las zonas: " + ", ".join(outsiders[:5]))
+
     actual = _lpf_result_stats(played)
+    labels = {"pj": "PJ", "pts": "pts", "gf": "GF", "ga": "GC", "dg": "DG"}
     for label in (zones or {}):
         for team, expected in zones[label].items():
             row = actual.get(team, {})
+            diffs = []
             for key in ("pj", "pts", "gf", "ga", "dg"):
-                if key in (expected or {}) and int((expected or {}).get(key, 0)) != int(row.get(key, 0)):
-                    return False
-    return True
+                if key not in (expected or {}):
+                    continue
+                wanted = int((expected or {}).get(key, 0))
+                got = int(row.get(key, 0))
+                if wanted != got:
+                    diffs.append(f"{labels[key]} {got}/{wanted}")
+            if diffs:
+                mismatches.append(f"{team}: " + ", ".join(diffs))
+            if limit and len(mismatches) >= int(limit):
+                return mismatches
+    return mismatches
 
 
 def _lpf_complete_results_for_zones(zones, *collections):
@@ -6888,6 +6916,14 @@ def cargar_lpf_todo():
 
 def cargar_lpf_espn(liga="arg.1"):
     """Actualiza tablas y reconcilia resultados entre dos fuentes automáticas."""
+    # Este flujo se ejecuta por acción explícita del editor. No debe reutilizar un
+    # scoreboard de minutos antes mientras la tabla ya refleja partidos terminados.
+    for cached_getter in (_espn_get, _standings_html_get):
+        try:
+            cached_getter.clear()
+        except Exception:
+            pass
+
     if _lpf_opening_is_valid(globals().get("LPF_APERTURA_BASE_2026") or {}):
         st.session_state.LPF_APERTURA = canon_base(LPF_APERTURA_BASE_2026)
 
@@ -6925,13 +6961,17 @@ def cargar_lpf_espn(liga="arg.1"):
     previous_played = list(previous_state.get("jugados") or [])
     manual_played = parse_resultados_lpf(st.session_state.get("LPF_RES_TXT") or "")
     builtin_played = _lpf_builtin_results()
+    # Primero se preserva la foto ya validada y las fuentes automáticas sólo
+    # completan parejas que todavía faltan. Si esa estrategia no alcanza, el
+    # reconciliador igualmente prueba luego candidatos con prioridad de fuente,
+    # útil ante una corrección oficial de un marcador anterior.
     played = _lpf_complete_results_for_zones(
         zones,
         manual_played,
-        fa_played,
-        espn_played,
         previous_played,
         builtin_played,
+        fa_played,
+        espn_played,
     )
 
     source_notes = []
@@ -6948,6 +6988,23 @@ def cargar_lpf_espn(liga="arg.1"):
         result_source_warnings.append("ESPN no pudo completar los resultados: " + ferr_espn)
     if fa_error:
         result_source_warnings.append("FutbolArgentino.com no pudo completar los resultados: " + fa_error)
+
+    expected_results = expected_played_count(zones)
+    diagnostic_candidates = [
+        ("base anterior + FutbolArgentino.com", _merge_lpf_results(fa_played, builtin_played, previous_played, manual_played)),
+        ("base anterior + ESPN", _merge_lpf_results(espn_played, builtin_played, previous_played, manual_played)),
+    ]
+    diagnostic_notes = []
+    for diagnostic_name, diagnostic_played in diagnostic_candidates:
+        diffs = _lpf_results_mismatches(zones, diagnostic_played, limit=4)
+        if diffs:
+            diagnostic_notes.append(diagnostic_name + ": " + "; ".join(diffs))
+
+    coverage_note = (
+        f"La tabla implica {expected_results if expected_results is not None else '?'} partidos; "
+        f"FutbolArgentino.com aportó {len(fa_played)}, ESPN {len(espn_played)}, "
+        f"la base anterior {len(previous_played)} y la base incluida {len(builtin_played)}."
+    )
 
     # La actualización es transaccional: una consulta vacía o incompleta jamás
     # reemplaza una foto válida por cero resultados. Si ninguna combinación explica
@@ -6970,12 +7027,16 @@ def cargar_lpf_espn(liga="arg.1"):
                 ),
                 "fuente": source_name,
                 "avisos_fuente": list(source_warnings or []) + result_source_warnings + [
+                    coverage_note,
+                    *diagnostic_notes[:2],
                     "No reemplacé la base anterior porque los resultados no explicaban los PJ de la tabla."
                 ],
             }, None
+        detail = (" " + " ".join(diagnostic_notes[:2])) if diagnostic_notes else ""
         return None, (
             "Las tablas se actualizaron, pero ninguna fuente de resultados explica "
-            "exactamente PJ, puntos y goles publicados. No se reemplazó la base con datos incompletos."
+            "exactamente PJ, puntos y goles publicados. " + coverage_note + detail +
+            " No se reemplazó la base con datos incompletos."
         )
 
     st.session_state.LPF_RES_TXT = "\n".join(
