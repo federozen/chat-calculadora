@@ -1,7 +1,7 @@
 """
 ⚽ Calculadora de escenarios — LPF 2026
 Convertido de Jupyter Notebook (v2) a Streamlit
-Actualización 3.7.5: exportador estable y reporte editorial completo por equipo.
+Actualización 3.7.6: resultados reconciliados entre ESPN y FutbolArgentino.com.
 """
 
 import streamlit as st
@@ -21,6 +21,12 @@ from lpf_competition_narratives import (
 from lpf_scenarios import can_fail_with_points, exact_result_scenarios, point_ladder, scenario_rank_bounds, best_worst_window_scenarios, exact_rank_bounds_with_points, reachable_point_totals
 from lpf_competitive_context import competition_context, historical_reference
 from lpf_display import display_team, editorialize_frame, editorialize_spec, editorialize_text
+from lpf_fixture_sources import (
+    expected_played_count,
+    parse_futbolargentino_results_html,
+    played_pending_from_records,
+    validate_fixture_records,
+)
 
 # La interfaz muestra nombres periodísticos (River, Boca, Vélez, etc.) sin
 # cambiar las claves canónicas que usa el motor para fixtures y cálculos.
@@ -2238,6 +2244,9 @@ FUTBOLARGENTINO_ANNUAL_URL = (
     "https://www.futbolargentino.com/primera-division/"
     "tabla-general/tabla-de-posiciones"
 )
+FUTBOLARGENTINO_RESULTS_URL = (
+    "https://www.futbolargentino.com/primera-division/resultados"
+)
 FUTBOLARGENTINO_REFERER = "https://www.futbolargentino.com/primera-division/"
 LPF_SNAPSHOT_MAX_AGE_HOURS = 168  # una semana; después obliga a revisar/cargar manualmente
 
@@ -2656,6 +2665,32 @@ def futbolargentino_annual(timeout=30):
     annual = max(candidates, key=len)
     _validate_base_rows(annual, expected_size=30, label="Tabla anual", max_pj=32)
     return canon_base(annual), final_url
+
+
+def futbolargentino_fixture(zones, timeout=30):
+    """Carga resultados y programación del Clausura desde FutbolArgentino.com.
+
+    El sitio publica los partidos en el HTML inicial, por lo que no hace falta
+    ejecutar un navegador. El parser filtra todo contra ``LPF_FIXTURE`` y la
+    validación exige suficientes marcadores para explicar los PJ de las zonas.
+    """
+    html, final_url = _standings_html_get(
+        FUTBOLARGENTINO_RESULTS_URL,
+        FUTBOLARGENTINO_REFERER,
+        timeout=timeout,
+    )
+    records = parse_futbolargentino_results_html(
+        html,
+        canon_club=canon_club,
+        official_fixture=LPF_FIXTURE,
+    )
+    records = validate_fixture_records(
+        records,
+        official_fixture=LPF_FIXTURE,
+        expected_played=expected_played_count(zones),
+    )
+    played, pending = played_pending_from_records(records)
+    return played, pending, final_url
 
 
 def _snapshot_path():
@@ -6456,33 +6491,70 @@ def _lpf_result_counts(played):
     return counts
 
 
+def _lpf_result_stats(played):
+    """Reconstruye PJ, puntos y goles de cada club desde los marcadores."""
+    stats = {}
+    for local, visitor, gl, gv in played or []:
+        local, visitor = canon_club(local), canon_club(visitor)
+        gl, gv = int(gl), int(gv)
+        for team in (local, visitor):
+            stats.setdefault(team, {"pj": 0, "pts": 0, "gf": 0, "ga": 0, "dg": 0})
+        stats[local]["pj"] += 1
+        stats[visitor]["pj"] += 1
+        stats[local]["gf"] += gl
+        stats[local]["ga"] += gv
+        stats[visitor]["gf"] += gv
+        stats[visitor]["ga"] += gl
+        if gl > gv:
+            stats[local]["pts"] += 3
+        elif gv > gl:
+            stats[visitor]["pts"] += 3
+        else:
+            stats[local]["pts"] += 1
+            stats[visitor]["pts"] += 1
+    for row in stats.values():
+        row["dg"] = row["gf"] - row["ga"]
+    return stats
+
+
 def _lpf_results_fit_zones(zones, played):
-    """Comprueba que los resultados explican exactamente los PJ de las zonas."""
+    """Comprueba que los resultados reconstruyen exactamente las dos zonas."""
     teams = {team for base in (zones or {}).values() for team in base}
-    counts = _lpf_result_counts(played)
     if any(local not in teams or visitor not in teams for local, visitor, _gl, _gv in played or []):
         return False
-    return all(
-        int((zones[label][team] or {}).get("pj", 0)) == int(counts.get(team, 0))
-        for label in (zones or {})
-        for team in zones[label]
-    )
+    actual = _lpf_result_stats(played)
+    for label in (zones or {}):
+        for team, expected in zones[label].items():
+            row = actual.get(team, {})
+            for key in ("pj", "pts", "gf", "ga", "dg"):
+                if key in (expected or {}) and int((expected or {}).get(key, 0)) != int(row.get(key, 0)):
+                    return False
+    return True
 
 
 def _lpf_complete_results_for_zones(zones, *collections):
     """Elige una combinación completa sin inferir partidos por descarte.
 
-    Primero prueba la unión de todas las fuentes. Si una fuente está adelantada
-    respecto de la tabla, prueba cada foto por separado y devuelve la más completa
-    que coincida exactamente con los PJ publicados.
+    Las colecciones se reciben en orden de prioridad. Se prueban combinaciones
+    que conservan la fuente más prioritaria para cada pareja y sólo se acepta una
+    foto que reconstruya PJ, puntos, GF, GC y DG de las zonas publicadas.
     """
     normalized = [_merge_lpf_results(collection) for collection in collections if collection]
-    merged = _merge_lpf_results(*normalized)
-    if merged and _lpf_results_fit_zones(zones, merged):
-        return merged
-    for candidate in sorted(normalized, key=len, reverse=True):
-        if _lpf_results_fit_zones(zones, candidate):
-            return candidate
+    seen = set()
+    for first_idx in range(len(normalized)):
+        later = list(range(first_idx + 1, len(normalized)))
+        for extra_count in range(len(later), -1, -1):
+            for extras in combinations(later, extra_count):
+                indexes = (first_idx,) + extras
+                # _merge_lpf_results deja ganar a la última colección. Se invierte
+                # el subconjunto para que la fuente con índice menor tenga prioridad.
+                candidate = _merge_lpf_results(*(normalized[idx] for idx in reversed(indexes)))
+                fingerprint = tuple(sorted((l, v, gl, gv) for l, v, gl, gv in candidate))
+                if not candidate or fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                if _lpf_results_fit_zones(zones, candidate):
+                    return candidate
     return []
 
 
@@ -6797,8 +6869,8 @@ def cargar_lpf_todo():
     previous_played = list(((st.session_state.get("ESTADO") or {}).get("jugados") or []))
     played = _lpf_complete_results_for_zones(
         zones,
-        previous_played,
         manual_played,
+        previous_played,
         _lpf_builtin_results(),
     ) or _merge_lpf_results(previous_played, manual_played, _lpf_builtin_results())
     if played and not st.session_state.get("LPF_RES_TXT"):
@@ -6815,7 +6887,7 @@ def cargar_lpf_todo():
 
 
 def cargar_lpf_espn(liga="arg.1"):
-    """Actualiza tablas con respaldos y usa ESPN para resultados/fixture."""
+    """Actualiza tablas y reconcilia resultados entre dos fuentes automáticas."""
     if _lpf_opening_is_valid(globals().get("LPF_APERTURA_BASE_2026") or {}):
         st.session_state.LPF_APERTURA = canon_base(LPF_APERTURA_BASE_2026)
 
@@ -6828,13 +6900,26 @@ def cargar_lpf_espn(liga="arg.1"):
     elif not st.session_state.get("LPF_ANUAL"):
         st.session_state.LPF_ANUAL = parse_tabla_anual(TABLA_ANUAL_LPF_2026)[0]
 
-    jug_raw, _pen_raw, nota, ferr = espn_fixture(liga, 120, desde="2026-07-01")
+    jug_raw, _pen_raw, nota_espn, ferr_espn = espn_fixture(liga, 120, desde="2026-07-01")
     eqset = {team for base in zones.values() for team in base}
-    live_played = []
+    espn_played = []
     for local, visitor, gl, gv in (jug_raw or []):
         cl, cv = canon_club(local), canon_club(visitor)
         if cl in eqset and cv in eqset:
-            live_played.append((cl, cv, int(gl), int(gv)))
+            espn_played.append((cl, cv, int(gl), int(gv)))
+
+    fa_played = []
+    fa_error = ""
+    fa_url = ""
+    try:
+        fa_played, _fa_pending, fa_url = futbolargentino_fixture(zones, timeout=30)
+        fa_played = [
+            (canon_club(local), canon_club(visitor), int(gl), int(gv))
+            for local, visitor, gl, gv in (fa_played or [])
+            if canon_club(local) in eqset and canon_club(visitor) in eqset
+        ]
+    except Exception as exc:
+        fa_error = str(exc)
 
     previous_state = st.session_state.get("ESTADO") or {}
     previous_played = list(previous_state.get("jugados") or [])
@@ -6842,11 +6927,27 @@ def cargar_lpf_espn(liga="arg.1"):
     builtin_played = _lpf_builtin_results()
     played = _lpf_complete_results_for_zones(
         zones,
-        live_played,
-        previous_played,
         manual_played,
+        fa_played,
+        espn_played,
+        previous_played,
         builtin_played,
     )
+
+    source_notes = []
+    if fa_played:
+        source_notes.append(f"FutbolArgentino.com: {len(fa_played)} resultados")
+    if espn_played:
+        source_notes.append(f"ESPN: {len(espn_played)} resultados")
+    if nota_espn:
+        source_notes.append(str(nota_espn).strip("()"))
+    nota = "(" + " · ".join(source_notes) + ")" if source_notes else ""
+
+    result_source_warnings = []
+    if ferr_espn:
+        result_source_warnings.append("ESPN no pudo completar los resultados: " + ferr_espn)
+    if fa_error:
+        result_source_warnings.append("FutbolArgentino.com no pudo completar los resultados: " + fa_error)
 
     # La actualización es transaccional: una consulta vacía o incompleta jamás
     # reemplaza una foto válida por cero resultados. Si ninguna combinación explica
@@ -6861,20 +6962,20 @@ def cargar_lpf_espn(liga="arg.1"):
                 "jug": len(previous_played),
                 "pend": len(previous_state.get("pendientes") or []),
                 "nota": nota or "",
-                "fixture_err": ferr or "La fuente de resultados quedó incompleta.",
+                "fixture_err": "Las fuentes de resultados no reconstruyen la tabla publicada.",
                 "calidad": getattr(previous_state.get("data_quality"), "level", "warning"),
                 "sin_confirmar": sum(
                     r.status == "unconfirmed"
                     for r in getattr(previous_state.get("data_quality"), "match_records", [])
                 ),
                 "fuente": source_name,
-                "avisos_fuente": list(source_warnings or []) + [
+                "avisos_fuente": list(source_warnings or []) + result_source_warnings + [
                     "No reemplacé la base anterior porque los resultados no explicaban los PJ de la tabla."
                 ],
             }, None
         return None, (
             "Las tablas se actualizaron, pero ninguna fuente de resultados explica "
-            "exactamente los PJ publicados. No se reemplazó la base con datos incompletos."
+            "exactamente PJ, puntos y goles publicados. No se reemplazó la base con datos incompletos."
         )
 
     st.session_state.LPF_RES_TXT = "\n".join(
@@ -6904,11 +7005,18 @@ def cargar_lpf_espn(liga="arg.1"):
         "jug": len(played),
         "pend": len(state["pendientes"]),
         "nota": nota or "",
-        "fixture_err": ferr or "",
+        "fixture_err": "",
         "calidad": report.level,
         "sin_confirmar": sum(r.status == "unconfirmed" for r in report.match_records),
         "fuente": source_name,
-        "avisos_fuente": source_warnings,
+        "avisos_fuente": list(source_warnings or []) + result_source_warnings,
+        "fuente_resultados": " + ".join(
+            name for name, rows in (
+                ("FutbolArgentino.com", fa_played),
+                ("ESPN", espn_played),
+            ) if rows
+        ),
+        "url_resultados": fa_url,
     }, None
 
 # ─── SIDEBAR ─────────────────────────────────────────────────────────────────────
@@ -7003,14 +7111,17 @@ with st.sidebar:
             ui_warning(_e + "  \u2014 mientras tanto podés pegar las tablas en «Otras formas de cargar».")
         else:
             _fuente = _r.get("fuente") or "fuente automática"
+            _fuente_res = _r.get("fuente_resultados") or "respaldo validado"
 
             ui_success(f"Actualizado desde {_fuente} \u2713 Zona A ({_r['A']}) \u00b7 Zona B ({_r['B']}) \u00b7 "
 
                        f"{_r['jug']} resultados \u00b7 {_r['pend']} pendientes")
 
+            ui_caption(f"Resultados cotejados con {_fuente_res}.")
+
             if _r.get("avisos_fuente"):
 
-                ui_caption("Respaldo activado: " + " | ".join(_r["avisos_fuente"]))
+                ui_caption("Avisos de fuentes: " + " | ".join(_r["avisos_fuente"]))
 
             if _r.get("fixture_err"):
 
@@ -7023,7 +7134,7 @@ with st.sidebar:
                 )
 
             st.rerun()
-    ui_caption("Intenta ESPN y, si las posiciones son rechazadas, usa FutbolArgentino.com. Si tampoco responde, recupera la última foto válida. También trae los **resultados** (forma y rachas) en un clic. "
+    ui_caption("Para las tablas intenta ESPN y FutbolArgentino.com; para los resultados coteja ambas fuentes y sólo acepta una combinación que reconstruya PJ, puntos y goles. Si ninguna coincide, conserva la última base válida. "
                "_La Tabla Anual se recalcula automáticamente desde el Apertura fijo; revisá el semáforo después de actualizar._")
     with st.expander("\U0001F6E0\ufe0f Otras formas de cargar o editar a mano (avanzado)", expanded=False):
         modo_carga = st.radio("Fuente", ["🇦🇷 LPF 2026 (Clausura: zonas A y B)", "Otra liga / copa (avanzado)"], label_visibility="collapsed")
@@ -7038,12 +7149,15 @@ with st.sidebar:
                     ui_warning(_e)
                 else:
                     _fuente = _r.get("fuente") or "fuente automática"
+                    _fuente_res = _r.get("fuente_resultados") or "respaldo validado"
 
                     ui_success(f"Cargado desde {_fuente}: Zona A ({_r['A']}) y Zona B ({_r['B']}) · {_r['jug']} resultados ✓")
 
+                    ui_caption(f"Resultados cotejados con {_fuente_res}.")
+
                     if _r.get("avisos_fuente"):
 
-                        ui_caption("Respaldo activado: " + " | ".join(_r["avisos_fuente"]))
+                        ui_caption("Avisos de fuentes: " + " | ".join(_r["avisos_fuente"]))
 
                     if _r.get("fixture_err"):
 
@@ -9393,7 +9507,7 @@ AYUDA_LPF = """### ⚽ Calculadora LPF 2026 — guía de uso
 
 **Cómo cargar y actualizar los datos**
 1. Botón grande **«📥 Cargar TODO»** — trae de una las dos zonas, la Tabla Anual, los promedios, el fixture de las 16 fechas y los resultados de la fecha 1 (datos internos, sirve sin internet).
-2. **«🔄 Actualizar a hoy (automático)»** — una vez por fecha: intenta ESPN y, si la tabla es rechazada, prueba FutbolArgentino.com; si ambas fuentes fallan, usa la última foto válida. Los resultados partido a partido siguen llegando desde ESPN; si todas las fuentes fallan, queda el pegado manual.
+2. **«🔄 Actualizar a hoy (automático)»** — una vez por fecha: intenta ESPN y FutbolArgentino.com para las tablas. Los resultados partido a partido se cotejan en ambas fuentes y sólo se aplican si reconstruyen exactamente PJ, puntos y goles; si no, se conserva la última base válida y queda el pegado manual.
 3. En **«🛠️ Otras formas de cargar»**: pegar las tablas de Promiedos, editar el histórico, y **«🥅 Resultados partido a partido»** para pegar/actualizar marcadores a mano.
 4. La app te avisa sola si los datos quedaron viejos o si hay una fecha en curso.
 
