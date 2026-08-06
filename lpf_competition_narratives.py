@@ -32,8 +32,8 @@ def _decimal_es(value: object, digits: int = 3) -> str:
 
 
 def ordered_rows(base: Mapping[str, Mapping[str, object]]) -> list[dict[str, object]]:
-    # La inserción conserva el orden de la tabla fuente para empates que siguen
-    # iguales después de PTS, DG y GF. No inventamos un desempate alfabético.
+    # Si PTS, DG y GF coinciden, se conserva el puesto publicado por la fuente.
+    # La inserción queda como último respaldo para cargas manuales sin metadata.
     source_order = {team: index for index, team in enumerate(base)}
     ordered = sorted(
         base.items(),
@@ -41,6 +41,7 @@ def ordered_rows(base: Mapping[str, Mapping[str, object]]) -> list[dict[str, obj
             -_num(item[1].get("pts")),
             -_num(item[1].get("dg")),
             -_num(item[1].get("gf")),
+            _num(item[1].get("source_pos"), 10_000 + source_order[item[0]]),
             source_order[item[0]],
         ),
     )
@@ -57,6 +58,11 @@ def ordered_rows(base: Mapping[str, Mapping[str, object]]) -> list[dict[str, obj
         }
         for index, (team, data) in enumerate(ordered, 1)
     ]
+
+
+def _renumber_rows(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """Renombra 1..N después de excluir campeones ya clasificados."""
+    return [{**dict(row), "pos": index} for index, row in enumerate(rows, 1)]
 
 
 def _gf(row: Mapping[str, object]) -> str:
@@ -401,7 +407,9 @@ def _cup_stake_for_team(
         return ""
     all_rows = ordered_rows(annual)
     raw_row = next((row for row in all_rows if row["team"] == team), None)
-    effective = [row for row in all_rows if row["team"] not in set(fixed_qualified)]
+    effective = _renumber_rows(
+        [row for row in all_rows if row["team"] not in set(fixed_qualified)]
+    )
     effective_base = {
         str(row["team"]): annual[str(row["team"])]
         for row in effective
@@ -464,9 +472,22 @@ def _cup_stake_for_team(
         )
 
     text = (
-        f"**Copas — {team}:** está {raw_row['pos']}º en la Tabla Anual con {_pts(raw_row['pts'])} en "
-        f"{raw_row['pj']} PJ y {pos}º entre los equipos elegibles; {status}."
+        f"**Copas — {team}:** está {raw_row['pos']}º en la Tabla Anual publicada con {_pts(raw_row['pts'])} en "
+        f"{raw_row['pj']} PJ y {pos}º en el orden para el reparto de cupos; {status}."
     )
+    if _num(raw_row["pos"]) != pos:
+        excluded_above = [
+            str(item["team"])
+            for item in all_rows
+            if _num(item["pos"]) < _num(raw_row["pos"]) and str(item["team"]) in set(fixed_qualified)
+        ]
+        if excluded_above:
+            verbo = "ya tiene" if len(excluded_above) == 1 else "ya tienen"
+            cierre = "queda fuera" if len(excluded_above) == 1 else "quedan fuera"
+            text += (
+                f" La diferencia entre ambas posiciones se debe a que {_team_list(excluded_above)} {verbo} "
+                f"una plaza directa y {cierre} de este reparto."
+            )
     bounds = scenario_rank_bounds(
         effective_base,
         [m for m in games if m[0] in effective_base or m[1] in effective_base],
@@ -475,11 +496,11 @@ def _cup_stake_for_team(
     if bounds.get("available"):
         best, worst = int(bounds["best_rank"]), int(bounds["worst_rank"])
         if best == 1 and pos == 1:
-            text += f" En esta ventana puede conservar el primer lugar por puntos y caer hasta el {worst}º entre los elegibles."
+            text += f" En esta ventana puede conservar el primer lugar por puntos y caer hasta el {worst}º en la carrera por los cupos."
         elif best == 1:
-            text += f" En esta ventana puede alcanzar el primer lugar por puntos y caer hasta el {worst}º entre los elegibles."
+            text += f" En esta ventana puede alcanzar el primer lugar por puntos y caer hasta el {worst}º en la carrera por los cupos."
         else:
-            text += f" En esta ventana puede cerrar {_rank_label(best, worst)} entre los elegibles por puntos."
+            text += f" En esta ventana puede cerrar {_rank_label(best, worst)} en la carrera por los cupos."
     if detailed:
         branch = _cup_result_rank_summary(
             team,
@@ -780,7 +801,7 @@ def round_preview_story(
         )
     if (include_cups or include_relegation) and annual:
         blocks.append(
-            "_En la Tabla Anual se distingue la posición general de la posición entre los equipos elegibles para las "
+            "_En la Tabla Anual se distingue la posición general de la posición en el orden para el reparto de "
             "copas. Los campeones pendientes todavía pueden modificar esa distribución. En los promedios se informa "
             "el efecto exacto de cada resultado sobre el coeficiente propio, pero no se asegura una posición futura._"
         )
@@ -956,7 +977,7 @@ def _effective_order(
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     rows = ordered_rows(annual)
     fixed = {team for team in fixed_qualified if team}
-    effective = [row for row in rows if row["team"] not in fixed]
+    effective = _renumber_rows([row for row in rows if row["team"] not in fixed])
     return rows, effective
 
 
@@ -1050,7 +1071,7 @@ def libertadores_story(
     lines.append("### Cómo se mueve la línea")
     lines.append(
         "- Si un equipo que hoy ocupa uno de los cupos por tabla gana el **Clausura** o la **Copa Argentina**, "
-        "sale de la lista de la Anual por tener una plaza propia y entra el siguiente equipo elegible."
+        "sale de la lista de la Anual por tener una plaza propia y entra el siguiente equipo en el orden."
     )
     lines.append(
         "- Si el campeón del Apertura también gana el Clausura, se habilita **un lugar adicional por la Tabla General** "
