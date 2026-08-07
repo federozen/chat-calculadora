@@ -1,7 +1,7 @@
 """
 ⚽ Calculadora de escenarios — LPF 2026
 Convertido de Jupyter Notebook (v2) a Streamlit
-Actualización 3.7.16: posiciones visibles siempre referidas a la Tabla Anual y mejor/peor puesto también en copas.
+Actualización 3.7.18: audita y centraliza las ventanas de escenarios para todos los equipos y servicios exactos; evita volver a congelar otras canchas y deduplica partidos antes de calcular.
 Mantiene las correcciones de datos y resultados de las versiones anteriores.
 """
 
@@ -4684,7 +4684,7 @@ def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""),
     posicion_ventana = ""
     try:
         _prox, _oficiales, _postergados = lpf_jornada_actual(pend or [])
-        _ventana = list(_oficiales) + [m for m, _f in _postergados]
+        _ventana = _lpf_dedupe_scenario_games(list(_oficiales) + [m for m, _f in _postergados])
         if _ventana:
             _anual_bounds = scenario_rank_bounds(
                 anual, [m for m in _ventana if m[0] in anual or m[1] in anual], equipo
@@ -8667,6 +8667,66 @@ def _lpf_scope_games(equipo, pend, scope="next_team_match", fecha=None):
     }
 
 
+def _lpf_normalize_match_identity(match):
+    """Devuelve la identidad canónica de un partido usando el fixture oficial.
+
+    Sirve para que todas las herramientas de escenarios compartan la misma noción
+    de partido y no puedan contar dos veces una ficha por alias u orientación.
+    """
+    if not match or len(match) < 2:
+        return None
+    local, visitor = match[0], match[1]
+    cl, cv, _gl, _gv = _lpf_normalize_result_identity(local, visitor, 0, 0)
+    return (cl, cv)
+
+
+def _lpf_dedupe_scenario_games(games):
+    """Normaliza y deduplica partidos antes de enviarlos a cualquier solver."""
+    out = []
+    seen = set()
+    for match in games or []:
+        normalized = _lpf_normalize_match_identity(tuple(match))
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
+
+def _lpf_preview_scenario_games(window, pend, scope="next_team_match"):
+    """Partidos que deben quedar abiertos al calcular gana/empata/pierde.
+
+    La tarjeta puede estar centrada en un único próximo partido, pero su rango de
+    puesto al cierre de la fecha depende también de las otras canchas de esa misma
+    jornada. La expansión se hace para cualquier equipo, no para un caso particular.
+    Para un postergado aislado se consideran los pendientes de su fecha oficial; si
+    esa referencia no existe, se usa el mismo día real como respaldo.
+    """
+    games = _lpf_dedupe_scenario_games(window.get("games") or [])
+    own = window.get("own_match")
+    if scope == "next_team_match" and own:
+        own = _lpf_normalize_match_identity(tuple(own))
+        own_meta = window.get("own_meta") or {}
+        round_no = own_meta.get("round") or _lpf_match_round(own)
+        expected = []
+        if round_no is not None:
+            expected = [
+                tuple(match) for match in (pend or [])
+                if _lpf_match_round(tuple(match)) == round_no
+            ]
+        elif own_meta.get("scheduled_at"):
+            day = own_meta["scheduled_at"].date()
+            expected = [
+                tuple(match) for match in (pend or [])
+                if (_lpf_match_datetime(tuple(match)) and _lpf_match_datetime(tuple(match)).date() == day)
+            ]
+        # Unión, no reemplazo ciego: si una fuente omite temporalmente una ficha de
+        # la fecha, el partido propio sigue incluido y el resto de la jornada no se
+        # congela. La deduplicación usa identidad oficial.
+        games = _lpf_dedupe_scenario_games(list(expected) + list(games) + ([own] if own else []))
+    return games
+
+
 def _lpf_scope_from_query(q, default="next_team_day"):
     text = _zlow(q)
     if any(token in text for token in ("solo posterg", "sólo posterg")):
@@ -8754,7 +8814,7 @@ def lpf_que_se_juega_fecha(
     prox, official_games, postponed = lpf_jornada_actual(pend, forzar=fecha)
     if prox is None:
         return "No quedan partidos pendientes.", None
-    games = list(official_games) + [match for match, _round in postponed]
+    games = _lpf_dedupe_scenario_games(list(official_games) + [match for match, _round in postponed])
     if not games:
         return "No hay partidos en la ventana elegida.", None
 
@@ -9082,8 +9142,7 @@ def lpf_arbol_sim(equipo, Z, rest, pend, top=_LPF_TOP_OCTAVOS, seed=17, jugados=
     mios = [(row["match"], row["round"]) for row in lpf_partidos_equipo_ordenados(equipo, pend)]
     if not mios:
         return None, None
-    n = 12000 if len(pend) <= 30 else 5000        # con pocas fechas, casi exacto
-    casi = len(pend) <= 30
+    n = 12000 if len(pend) <= 30 else 5000
     def chance(forced):
         pos = _sim_zone_pos(base, rest, pend, equipo, n, seed, forced=forced, jugados=jugados)
         return 100.0 * float((pos <= top).mean())
@@ -9114,8 +9173,8 @@ def lpf_arbol_sim(equipo, Z, rest, pend, top=_LPF_TOP_OCTAVOS, seed=17, jugados=
     if len(swings) > 1 and sw[0] >= 3:
         L.append(f"De los próximos partidos, el **bisagra es ante {sw[1]} (Fecha {sw[2]})**: "
                  f"ganarlo lo pone en {round(sw[3])}% y perderlo lo deja en {round(sw[4])}%.")
-    L.append("_Estimación por simulación" + (" (prácticamente exacta: quedan pocos partidos)" if casi else
-             f" ({n:,} torneos)") + ". Los veredictos «ya está» / «quedó afuera» son exactos; esto es una probabilidad, no un pronóstico._")
+    L.append(f"_ESTIMADO · {n:,} simulaciones. Los veredictos «ya está» / «quedó afuera» se calculan por separado; "
+             "esta distribución es una probabilidad del modelo, no un cálculo exacto ni un pronóstico._")
     return "\n\n".join(L), df
 
 
@@ -9417,6 +9476,7 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None,
         return None, None
     window = _lpf_scope_games(equipo, pend, scope=scope, fecha=fecha)
     games = list(window["games"])
+    scenario_games = _lpf_preview_scenario_games(window, pend, scope=scope)
     own_match = window.get("own_match")
     own_meta = window.get("own_meta") or {}
     title = f"## Próximo partido de {equipo}" if scope == "next_team_match" else f"## Previa de {window['label']} para {equipo}"
@@ -9456,7 +9516,7 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None,
             lines.append("Juegan dos veces en la ventana: **" + ", ".join(doubles) + "**.")
 
     rows = []
-    zone_scenarios = exact_result_scenarios(Z[lab], games, equipo, own_match, _LPF_TOP_OCTAVOS)
+    zone_scenarios = exact_result_scenarios(Z[lab], scenario_games, equipo, own_match, _LPF_TOP_OCTAVOS)
     zone_table = liga_tabla_df(Z[lab])
     current_zone_rank = int(zone_table.index[zone_table["Equipo"] == equipo][0] + 1)
     result_column = "Si River" if equipo == "River Plate" else f"Si {equipo}"
@@ -9482,7 +9542,7 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None,
     n_lib = 0
     if anual and equipo in anual:
         if mode == "descenso":
-            annual_scenarios = exact_result_scenarios(anual, games, equipo, own_match, len(anual))
+            annual_scenarios = exact_result_scenarios(anual, scenario_games, equipo, own_match, len(anual))
             n_annual = int((st.session_state.get("ESTADO") or {}).get("n_anual", 1))
             for scenario in annual_scenarios:
                 points = (str(scenario["points_min"]) if scenario["points_min"] == scenario["points_max"]
@@ -9502,7 +9562,7 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None,
             }
             n_lib = int(allocation.get("n_tabla_lib", 0))
             direct_route = fixed_routes.get(equipo, "")
-            annual_scenarios = exact_result_scenarios(anual, games, equipo, own_match, len(anual))
+            annual_scenarios = exact_result_scenarios(anual, scenario_games, equipo, own_match, len(anual))
             if direct_route:
                 route = re.sub(r"\s*\(art\.[^)]+\)", "", str(direct_route)).strip()
                 for scenario in annual_scenarios:
@@ -9518,7 +9578,7 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None,
                     })
             elif equipo in eligible:
                 eligible_base = {team: anual[team] for team in eligible}
-                cup_scenarios = exact_result_scenarios(eligible_base, games, equipo, own_match, len(eligible_base))
+                cup_scenarios = exact_result_scenarios(eligible_base, scenario_games, equipo, own_match, len(eligible_base))
                 for annual_scenario, cup_scenario in zip(annual_scenarios, cup_scenarios):
                     points = (str(annual_scenario["points_min"]) if annual_scenario["points_min"] == annual_scenario["points_max"]
                               else f"{annual_scenario['points_min']}–{annual_scenario['points_max']}")
@@ -9534,15 +9594,29 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None,
     win, draw, loss = zone_scenarios[0], zone_scenarios[1], zone_scenarios[2]
     if win["best_rank"] and win["best_rank"] > 1:
         lines.append(f"**No puede terminar primero:** aun ganando, el mejor puesto posible es "
-                     f"**{_ord(win['best_rank'])}**. El cálculo contempla victorias, empates y derrotas de los rivales; "
-                     "no supone que en cada partido haya necesariamente un ganador.")
-    if win["can_enter"]:
-        lines.append(f"**Si gana**, puede terminar entre **{_ord(win['best_rank'])} y {_ord(win['worst_rank'])}** "
-                     "en la Zona. El triunfo no necesariamente lo deja adentro: el extremo depende de las otras canchas y de los desempates.")
-    else:
-        lines.append(f"**Si gana**, su mejor ubicación es {_ord(win['best_rank'])}; todavía no puede entrar entre los ocho primeros.")
-    lines.append(f"**Si empata**, queda entre {_ord(draw['best_rank'])} y {_ord(draw['worst_rank'])}. "
-                 f"**Si pierde**, entre {_ord(loss['best_rank'])} y {_ord(loss['worst_rank'])}.")
+                     f"**{_ord(win['best_rank'])}**. El cálculo deja abiertos todos los otros partidos pendientes "
+                     "de esa misma fecha y contempla sus victorias, empates y derrotas.")
+
+    def _zone_branch_sentence(label, scenario):
+        best = scenario.get("best_rank")
+        worst = scenario.get("worst_rank")
+        if not best or not worst:
+            return f"**Si {label}**, no se pudo establecer un rango completo de posiciones."
+        if best == worst:
+            position = f"termina **{_ord(best)}** en la Zona"
+        else:
+            position = f"puede terminar entre **{_ord(best)} y {_ord(worst)}** en la Zona"
+        if scenario.get("can_enter") and not scenario.get("can_fail"):
+            status = "En todos los escenarios queda entre los ocho primeros."
+        elif scenario.get("can_enter") and scenario.get("can_fail"):
+            status = "Tiene escenarios en los que queda entre los ocho y otros en los que termina afuera."
+        else:
+            status = "No puede entrar entre los ocho primeros en esta fecha."
+        return f"**Si {label}**, {position}. {status}"
+
+    lines.append(_zone_branch_sentence("gana", win))
+    lines.append(_zone_branch_sentence("empata", draw))
+    lines.append(_zone_branch_sentence("pierde", loss))
     lines.append("_EXACTO POR PUNTOS · Cada partido tiene una sola salida posible: victoria local, empate o victoria visitante. "
                  "Cuando dos equipos terminan igualados, el rango incluye tanto el desempate favorable como el adverso; "
                  "no inventa marcadores futuros ni afirma quién ganará por DG, GF, mano a mano, fair play o sorteo._")
@@ -11751,10 +11825,10 @@ def _scenario_window_games(pending, scope="official_round"):
     jornada, juegos, atrasados = lpf_jornada_actual(pending or [])
     postponed = [match for match, _round in atrasados]
     if scope == "postponed_only":
-        return jornada, postponed
+        return jornada, _lpf_dedupe_scenario_games(postponed)
     if scope == "extended_window":
-        return jornada, list(juegos) + postponed
-    return jornada, list(juegos)
+        return jornada, _lpf_dedupe_scenario_games(list(juegos) + postponed)
+    return jornada, _lpf_dedupe_scenario_games(list(juegos))
 
 
 def _scenario_outcome_label(match, outcome):
