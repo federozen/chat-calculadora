@@ -6580,7 +6580,8 @@ Vélez 1-0 Independiente
 Huracán 0-0 Atlético Tucumán
 Central Córdoba 1-0 San Lorenzo
 Boca 1-0 Estudiantes
-Tigre 0-0 Belgrano"""
+Tigre 0-0 Belgrano
+Unión 2-1 Lanús"""
 
 def parse_resultados_lpf(text=None, canon=None):
     """Parsea líneas «Local G1-G2 Visita» → lista de tuplas (local, visita, gl, gv)
@@ -6716,6 +6717,86 @@ def _lpf_complete_results_for_zones(zones, *collections):
                 if _lpf_results_fit_zones(zones, candidate):
                     return candidate
     return []
+
+
+def _lpf_infer_single_missing_result(zones, baseline, fixture=None):
+    """Reconstruye un único partido faltante sólo si la tabla lo determina sin ambigüedad.
+
+    Este respaldo no adivina resultados ni asume que se jugó una fecha completa. Se activa
+    únicamente cuando, respecto de una foto de marcadores ya validada, exactamente dos clubes
+    avanzaron un PJ, el fixture oficial los enfrenta entre sí y los deltas de puntos, GF, GC y
+    DG fijan un único marcador que además reproduce exactamente las zonas publicadas.
+    """
+    fixture = fixture or LPF_FIXTURE
+    baseline = _merge_lpf_results(baseline)
+    if not zones or not baseline or _lpf_results_fit_zones(zones, baseline):
+        return [], ""
+
+    expected = {}
+    for base in (zones or {}).values():
+        for team, row in (base or {}).items():
+            expected[canon_club(team)] = {
+                key: int((row or {}).get(key, 0))
+                for key in ("pj", "pts", "gf", "ga", "dg")
+            }
+    actual = _lpf_result_stats(baseline)
+    deltas = {}
+    for team, wanted in expected.items():
+        got = actual.get(team, {"pj": 0, "pts": 0, "gf": 0, "ga": 0, "dg": 0})
+        delta = {key: int(wanted[key]) - int(got.get(key, 0)) for key in wanted}
+        # Una foto base con más PJ/puntos/goles que la tabla vigente no permite inferir nada.
+        if any(delta[key] < 0 for key in ("pj", "pts", "gf", "ga")):
+            return [], ""
+        deltas[team] = delta
+
+    advanced = [team for team, delta in deltas.items() if delta["pj"] != 0]
+    if len(advanced) != 2 or any(deltas[team]["pj"] != 1 for team in advanced):
+        return [], ""
+    if sum(delta["pj"] for delta in deltas.values()) != 2:
+        return [], ""
+
+    a, b = advanced
+    played_pairs = {(canon_club(l), canon_club(v)) for l, v, _gl, _gv in baseline}
+    candidates = []
+    for row in fixture or []:
+        home, away = canon_club(row.get("l") or row.get("home") or ""), canon_club(row.get("v") or row.get("away") or "")
+        if not home or not away or (home, away) in played_pairs:
+            continue
+        if {home, away} == {a, b}:
+            candidates.append((home, away))
+    candidates = list(dict.fromkeys(candidates))
+    if len(candidates) != 1:
+        return [], ""
+
+    home, away = candidates[0]
+    gh = deltas[home]["gf"]
+    ga = deltas[home]["ga"]
+    if gh < 0 or ga < 0:
+        return [], ""
+    # Los goles deben cerrar vistos desde ambos lados.
+    if deltas[away]["gf"] != ga or deltas[away]["ga"] != gh:
+        return [], ""
+    if deltas[home]["dg"] != gh - ga or deltas[away]["dg"] != ga - gh:
+        return [], ""
+
+    if gh > ga:
+        pts_home, pts_away = 3, 0
+    elif ga > gh:
+        pts_home, pts_away = 0, 3
+    else:
+        pts_home = pts_away = 1
+    if deltas[home]["pts"] != pts_home or deltas[away]["pts"] != pts_away:
+        return [], ""
+
+    inferred = (home, away, int(gh), int(ga))
+    candidate = _merge_lpf_results(baseline, [inferred])
+    if not _lpf_results_fit_zones(zones, candidate):
+        return [], ""
+    note = (
+        f"Conciliación por tabla: {home} {gh}-{ga} {away}. "
+        "El marcador surge de un único PJ faltante y reproduce exactamente PJ, puntos, GF, GC y DG."
+    )
+    return [inferred], note
 
 
 def _lpf_builtin_results():
@@ -7110,11 +7191,34 @@ def cargar_lpf_espn(liga="arg.1"):
         espn_played,
     )
 
+    inferred_played = []
+    inferred_note = ""
+    if not played:
+        # Si las fuentes de marcadores van unos minutos detrás de la tabla, admitir sólo
+        # el caso matemáticamente inequívoco de un único partido nuevo. La foto histórica
+        # validada conserva prioridad y la inferencia debe cerrar todos los campos publicados.
+        trusted_baseline = _merge_lpf_results(builtin_played, previous_played, manual_played)
+        inferred_played, inferred_note = _lpf_infer_single_missing_result(
+            zones, trusted_baseline, LPF_FIXTURE
+        )
+        if inferred_played:
+            played = _lpf_complete_results_for_zones(
+                zones,
+                manual_played,
+                previous_played,
+                builtin_played,
+                inferred_played,
+                fa_played,
+                espn_played,
+            )
+
     source_notes = []
     if fa_played:
         source_notes.append(f"FutbolArgentino.com: {len(fa_played)} resultados")
     if espn_played:
         source_notes.append(f"ESPN: {len(espn_played)} resultados")
+    if inferred_played:
+        source_notes.append(f"conciliación determinística: {len(inferred_played)} resultado")
     if nota_espn:
         source_notes.append(str(nota_espn).strip("()"))
     nota = "(" + " · ".join(source_notes) + ")" if source_notes else ""
@@ -7124,6 +7228,8 @@ def cargar_lpf_espn(liga="arg.1"):
         result_source_warnings.append("ESPN no pudo completar los resultados: " + ferr_espn)
     if fa_error:
         result_source_warnings.append("FutbolArgentino.com no pudo completar los resultados: " + fa_error)
+    if inferred_note:
+        result_source_warnings.append(inferred_note)
 
     expected_results = expected_played_count(zones)
     diagnostic_candidates = [
@@ -7139,7 +7245,9 @@ def cargar_lpf_espn(liga="arg.1"):
     coverage_note = (
         f"La tabla implica {expected_results if expected_results is not None else '?'} partidos; "
         f"FutbolArgentino.com aportó {len(fa_played)}, ESPN {len(espn_played)}, "
-        f"la base anterior {len(previous_played)} y la base incluida {len(builtin_played)}."
+        f"la base anterior {len(previous_played)}, la base incluida {len(builtin_played)}"
+        + (f" y la conciliación determinística {len(inferred_played)}" if inferred_played else "")
+        + "."
     )
 
     # La actualización es transaccional: una consulta vacía o incompleta jamás
