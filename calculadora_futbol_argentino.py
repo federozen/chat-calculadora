@@ -1,8 +1,8 @@
 """
 ⚽ Calculadora de escenarios — LPF 2026
 Convertido de Jupyter Notebook (v2) a Streamlit
-Actualización 3.7.15: identidad única de partidos y reparación de dobles contabilizaciones.
-Mantiene la mejora 3.7.13 para rangos amplios y narrativa respecto del corte.
+Actualización 3.7.16: posiciones visibles siempre referidas a la Tabla Anual y mejor/peor puesto también en copas.
+Mantiene las correcciones de datos y resultados de las versiones anteriores.
 """
 
 import streamlit as st
@@ -3936,7 +3936,7 @@ def lpf_plazas_copas(Z, apertura=None, camps=("", "", ""), extras=("", ""), copa
             poner(cq, "Campeón de la Copa Argentina (art. 27.3, plaza inalterable)")
             n_base -= 1
     else:
-        avisos.append("Falta definirse el campeón de la **Copa Argentina 2026**. Su plaza **ARGENTINA 3** permanece dentro de esa competencia y, cuando se conozca al campeón, se lo excluirá del reparto de los tres cupos de Libertadores por Tabla General.")
+        avisos.append("Falta definirse el campeón de la **Copa Argentina 2026**. Su plaza **ARGENTINA 3** permanece dentro de esa competencia y, cuando se conozca al campeón, ese club ya no consumirá otro cupo por la Tabla Anual.")
         n_base -= 1
     if not ca:
         avisos.append("Falta el campeón del **Apertura**."); n_base -= 1
@@ -3946,7 +3946,7 @@ def lpf_plazas_copas(Z, apertura=None, camps=("", "", ""), extras=("", ""), copa
     tomados = [e for e, _ in lib]
     reducida = [e for e in orden if e not in tomados]
     for k, e in enumerate(reducida[:n_tabla_lib]):
-        lib.append((e, f"por Tabla General ({orden.index(e)+1}º de la anual; {k+1}º sin contar a los campeones) — arts. 27.4 a 27.6"))
+        lib.append((e, f"por Tabla Anual ({orden.index(e)+1}º) — arts. 27.4 a 27.6"))
     return {"lib": lib, "n_tabla_lib": n_tabla_lib, "orden": orden, "reducida": reducida,
             "avisos": avisos, "anual": anual, "tomados": [e for e, _ in lib]}
 
@@ -3960,8 +3960,8 @@ def lpf_copas_texto(Z, apertura=None, camp_apertura="", camp_clausura="", camp_c
     L.append("### 🏆 Copa Libertadores 2027")
     for i, (e, motivo) in enumerate(P["lib"], 1):
         L.append(f"**{i}.** {e} — {motivo}")
-    L.append(f"**Cupos que se reparten por la Tabla General: {n_t}.** "
-             f"Por la anual entran los **{n_t} mejores que no tengan plaza** (no necesariamente los {n_t} primeros). "
+    L.append(f"**Cupos de Libertadores que se definen por la Tabla Anual: {n_t}.** "
+             f"Entran los **{n_t} mejores de la Anual que todavía no tengan plaza**. La posición mostrada siempre es la de la tabla completa. "
              "Si Apertura y Clausura tienen el mismo campeón, su plaza duplicada sí corre a la anual (art. 27.7). "
              "Una duplicación del campeón de Copa Argentina se resuelve dentro de esa Copa, no por la anual (art. 27.8).")
     sud = [e for e in red[n_t:]][:6]
@@ -4451,8 +4451,7 @@ def _copas_bloque_objetivo(equipo, base_red, rest, pend, k, nombre_obj, modo="en
                 prefijo = f"Como se salvan {k}, "
             elif cupos_reales is not None and cupos_reales != k:
                 prefijo = (
-                    f"Como {nombre_obj} entrega {cupos_reales} cupos y, con la configuración actual, el último "
-                    f"queda en el {k}º puesto del reparto de cupos, "
+                    f"Como {nombre_obj} entrega {cupos_reales} cupos por esta vía y algunos clubes ya tienen plaza directa, "
                 )
             else:
                 prefijo = f"Como por esta tabla entran {k} a {nombre_obj}, "
@@ -4585,13 +4584,13 @@ def _escenario_maximo_copas_bloque(equipo, base_red, rest, pend, k_lib, k_sud, m
     deben_ceder_lib = max(0, len(amenazas) - (k_lib - 1))
     deben_ceder_sud = max(0, len(amenazas) - (k_sud - 1))
     L.append(
-        f"**Para la Libertadores:** como entran los primeros {k_lib} del orden para el reparto, al menos "
+        f"**Para la Libertadores:** con la distribución actual de plazas por la Tabla Anual, al menos "
         f"**{deben_ceder_lib} de esos {len(amenazas)} equipos** deben terminar detrás de {equipo}, ya sea por "
         "puntos o por los criterios de desempate."
     )
     L.append(
-        f"**Para obtener al menos Sudamericana:** con la configuración actual, la última plaza queda en el "
-        f"{k_sud}º puesto del reparto. Por eso, al menos **{deben_ceder_sud} de esos {len(amenazas)} equipos** deben "
+        f"**Para obtener al menos Sudamericana:** con la distribución actual de plazas por la Tabla Anual, "
+        f"al menos **{deben_ceder_sud} de esos {len(amenazas)} equipos** deben "
         f"terminar detrás de {equipo}."
     )
     L.append(
@@ -4640,11 +4639,11 @@ def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""),
     referencias = []
 
     if e_lib == "in":
-        titular = f"Por la Tabla General, {equipo} ya tiene la Libertadores asegurada."
+        titular = f"Por la Tabla Anual, {equipo} ya tiene la Libertadores asegurada."
     elif e_lib == "out" and e_sud == "out":
-        titular = f"Por la Tabla General, {equipo} quedó sin chances de copa."
+        titular = f"Por la Tabla Anual, {equipo} quedó sin chances de copa."
     elif e_lib == "out":
-        titular = f"{equipo} ya no llega a la Libertadores por la Tabla General: su pelea es por la Sudamericana."
+        titular = f"{equipo} ya no llega a la Libertadores por la Tabla Anual: su pelea es por la Sudamericana."
     else:
         titular = (
             f"{equipo} sigue en carrera por las copas de 2027. La Libertadores exige una remontada mayor; la "
@@ -4660,43 +4659,56 @@ def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""),
                 f"al menos Sudamericana: alrededor de {int(target_sud)} puntos totales "
                 f"(+{max(0, int(target_sud) - pts_e)} desde hoy)"
             )
-    posicion_actual = f"Hoy está **{pos_general}º en la Tabla Anual publicada**"
-    if pos_general != pos_red:
-        posicion_actual += f" y **{pos_red}º en el orden para el reparto de cupos**"
-    posicion_actual += (
-        f", con **{pts_e} puntos en {pj_e} PJ**. Le quedan **{gx} partidos** y "
-        f"**{3 * gx} puntos** disponibles."
+    posicion_actual = (
+        f"Hoy está **{pos_general}º en la Tabla Anual**, con **{pts_e} puntos en {pj_e} PJ**. "
+        f"Le quedan **{gx} partidos** y **{3 * gx} puntos** disponibles."
     )
 
     excluidos_antes = [
         e for e in P["orden"][: max(0, pos_general - 1)]
         if e not in red
     ]
-    explicacion_elegibles = ""
+    nota_clasificados_arriba = ""
     if excluidos_antes:
-        motivos_directos = dict(P["lib"])
-        detalles = []
-        for excluido in excluidos_antes:
-            motivo = motivos_directos.get(excluido, "ya tiene una plaza directa")
-            motivo = motivo.split("—")[0].strip().rstrip(".")
-            motivo = re.sub(r"\s*\(arts?\.?.*?\)\s*$", "", motivo, flags=re.IGNORECASE).strip()
-            if motivo:
-                motivo = motivo[:1].lower() + motivo[1:]
-            detalles.append(f"**{excluido}** ({motivo})")
-        verbo = "queda" if len(detalles) == 1 else "quedan"
-        explicacion_elegibles = (
-            f" La diferencia entre ambas posiciones se debe a que {', '.join(detalles)} {verbo} "
-            "fuera del reparto por la Tabla Anual."
-        )
+        nombres = [f"**{e}**" for e in excluidos_antes]
+        if len(nombres) == 1:
+            nota_clasificados_arriba = (
+                f" (Entre los equipos que tiene arriba, {nombres[0]} ya tiene una plaza directa de Libertadores.)"
+            )
+        else:
+            nota_clasificados_arriba = (
+                f" (Entre los equipos que tiene arriba, {', '.join(nombres[:-1])} y {nombres[-1]} "
+                "ya tienen una plaza directa de Libertadores.)"
+            )
+
+    posicion_ventana = ""
+    try:
+        _prox, _oficiales, _postergados = lpf_jornada_actual(pend or [])
+        _ventana = list(_oficiales) + [m for m, _f in _postergados]
+        if _ventana:
+            _anual_bounds = scenario_rank_bounds(
+                anual, [m for m in _ventana if m[0] in anual or m[1] in anual], equipo
+            )
+            if _anual_bounds.get("available"):
+                _best_a = int(_anual_bounds["best_rank"])
+                _worst_a = int(_anual_bounds["worst_rank"])
+                posicion_ventana = (
+                    f"En la próxima ventana, su **mejor posición posible en la Tabla Anual es {_best_a}º** "
+                    f"y la **peor {_worst_a}º**."
+                )
+    except Exception:
+        posicion_ventana = ""
 
     L = [
         f"## {equipo} · Copas 2027",
         f"**{titular}**",
-        posicion_actual + explicacion_elegibles,
+        posicion_actual + nota_clasificados_arriba,
         "Este informe calcula la vía de la **Tabla Anual** —denominada **Tabla General** en el reglamento—. "
         "La simulación usa la distribución actual de los cupos y **no asigna probabilidades a los "
         "campeones todavía pendientes**. Esos títulos se explican después como escenarios separados.",
     ]
+    if posicion_ventana:
+        L.append(posicion_ventana)
     if referencias:
         L.append("**Referencias del modelo:**")
         for referencia in referencias:
@@ -4772,18 +4784,18 @@ def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""),
                  "hacia abajo la línea de clasificación.")
     L.append(
         "**Excepción Copa Argentina:** cuando quede definido quién ocupa la plaza ARGENTINA 3, ese equipo será "
-        "excluido del reparto por Tabla General. Si el campeón ya obtuvo la plaza del Apertura o del Clausura, "
+        "considerado ya clasificado por otra vía. Si el campeón ya obtuvo la plaza del Apertura o del Clausura, "
         "ARGENTINA 3 pasa al siguiente equipo de Primera mejor ubicado dentro de la Copa Argentina; no pasa al "
-        "siguiente de la Tabla General."
+        "siguiente de la Tabla Anual."
     )
 
     # ── Letra chica ──
     chica = ["### Cómo leer estos números",
              "La Tabla General suma únicamente los puntos de las fases regulares del Apertura y del Clausura; "
              "los playoffs no agregan puntos a esta clasificación.",
-             "Para repartir las plazas se utiliza la **Tabla General**, excluyendo a los equipos que ya hayan "
-             f"obtenido una plaza de Libertadores. Los **primeros {n_t} de ese orden** clasifican a la Libertadores "
-             "y los **6 siguientes**, a la Sudamericana.",
+             "En todo el informe, la **posición mostrada es siempre la posición real de la Tabla Anual**. "
+             "Para asignar las plazas, un club que ya clasificó a la Libertadores por otra vía no consume otro cupo; "
+             "por eso la línea puede correrse al siguiente equipo, pero no se muestra una segunda numeración.",
              "Además de esta vía, el campeón del Clausura obtiene una plaza directa. Si un club argentino gana "
              "la Libertadores o la Sudamericana 2026, obtiene una plaza adicional para la Libertadores 2027."]
     _camp_plaza = [(e, m) for (e, m) in P["lib"] if e not in red]
@@ -4793,11 +4805,11 @@ def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""),
             _e, _m = _camp_plaza[0]
             _motivo = _m.split('(art')[0].split('—')[0].strip()
             _motivo_txt = _motivo[:1].lower() + _motivo[1:] if _motivo else "campeón"
-            chica.append(f"**{_e}** ya tiene una plaza como {_motivo_txt} y queda excluido del reparto por Tabla General. "
-                         "Por eso, el siguiente equipo en el orden sube un lugar.")
+            chica.append(f"**{_e}** ya tiene una plaza como {_motivo_txt}. Conserva su puesto normal en la Tabla Anual, "
+                         "pero no consume otro cupo por esa vía.")
         else:
-            chica.append(f"Ya tienen plaza y quedan excluidos del reparto por Tabla General: {_cl}. "
-                         "Por eso, los equipos que siguen suben en el orden.")
+            chica.append(f"Ya tienen plaza por otra vía: {_cl}. Conservan su puesto normal en la Tabla Anual, "
+                         "pero no consumen otro cupo por esa vía.")
     chica.append(
         "El informe separa el **corte actual**, la **proyección del modelo**, la **referencia histórica** y la "
         "**garantía matemática**. Tanto una garantía exacta como una línea conservadora permiten afirmar que el "
@@ -4807,8 +4819,8 @@ def lpf_copas_necesita_texto(equipo, Z, rest, apertura=None, camps=("", "", ""),
     if P["avisos"]:
         chica.append(
             "**Definiciones pendientes.** " + " ".join(P["avisos"]) + " La simulación no asigna probabilidades "
-            "a esos campeones: los presenta como escenarios separados porque pueden modificar el orden de los "
-            "equipos en el orden para el reparto de cupos."
+            "a esos campeones: los presenta como escenarios separados porque pueden modificar qué equipos ocupan "
+            "los cupos que entrega la Tabla Anual."
         )
     L += chica
     return editorialize_text("\n\n".join(L))
@@ -8757,7 +8769,7 @@ def lpf_que_se_juega_fecha(
     allocation = lpf_plazas_copas(Z, apertura or {}, camps or ("", "", ""), extras or ("", "")) if annual else {}
     fixed_routes = {
         team: motive for team, motive in allocation.get("lib", [])
-        if "por Tabla General" not in str(motive)
+        if "arts. 27.4 a 27.6" not in str(motive)
     }
     eligible = [team for team in allocation.get("orden", []) if team not in fixed_routes and team in annual]
     eligible_base = {team: annual[team] for team in eligible}
@@ -8839,11 +8851,26 @@ def lpf_que_se_juega_fecha(
             else:
                 playoff_text = f"No puede entrar a playoffs en esta ventana; su mejor puesto por puntos es {_ord(best)}."
 
+        annual_bounds_team = scenario_rank_bounds(annual, games, team) if annual and team in annual else {}
+        current_annual = annual_positions.get(team)
+        annual_rank_text = ""
+        if current_annual:
+            annual_rank_text = f"Está {_ord(current_annual)} en la Tabla Anual."
+        if annual_bounds_team.get("available"):
+            abest_team = int(annual_bounds_team["best_rank"])
+            aworst_team = int(annual_bounds_team["worst_rank"])
+            annual_rank_text += (
+                f" Su mejor posición posible al cierre de la ventana es {_ord(abest_team)} "
+                f"y la peor {_ord(aworst_team)}."
+            )
+
         cup_text = ""
         cup_material = False
         direct_route = fixed_routes.get(team, "")
         if direct_route:
-            cup_text = f"Ya está clasificado a las copas por {_clean_route(direct_route)}."
+            cup_text = (annual_rank_text + " " if annual_rank_text else "") + (
+                f"Ya está clasificado a las copas por {_clean_route(direct_route)}."
+            )
             cup_material = True
         elif team in eligible_base:
             cup_bounds = scenario_rank_bounds(eligible_base, games, team)
@@ -8853,33 +8880,45 @@ def lpf_que_se_juega_fecha(
                     1 for rival in eligible_base
                     if rival != team and int(eligible_base[rival].get("pts", 0)) > int(eligible_base[team].get("pts", 0))
                 )
+                status = ""
                 if n_lib and cworst <= n_lib:
-                    cup_text = "Asegura cerrar la ventana en zona de Libertadores dentro del reparto de cupos."
-                    cup_material = True
+                    status = "Asegura cerrar la ventana en zona de Libertadores por la Tabla Anual."
                 elif n_lib and cbest <= n_lib:
                     if cworst <= cup_end:
-                        cup_text = "Puede quedar en zona de Libertadores o Sudamericana según el reparto actual de cupos."
+                        status = "Puede terminar la ventana en zona de Libertadores o Sudamericana."
                     else:
-                        cup_text = "Puede quedar en Libertadores, Sudamericana o fuera de los cupos."
-                    cup_material = True
+                        status = "Puede terminar en Libertadores, Sudamericana o fuera de los puestos de clasificación internacional."
                 elif cbest <= cup_end:
                     if cworst <= cup_end:
-                        cup_text = "Asegura cerrar al menos en zona de Sudamericana dentro del reparto de cupos."
+                        status = "Asegura cerrar al menos en zona de Sudamericana por la Tabla Anual."
                     else:
-                        cup_text = "Puede entrar a una copa o quedar afuera de los cupos."
-                    cup_material = True
+                        status = "Puede entrar a una copa o terminar afuera de los puestos de clasificación internacional."
                 elif current_eligible <= cup_end + 2 or cbest <= cup_end + 1:
-                    cup_text = f"Sigue fuera de los cupos; su mejor puesto en el reparto durante la ventana es {_ord(cbest)}."
+                    status = "Sigue fuera de los puestos de clasificación internacional en esta ventana."
+                if status:
+                    cup_text = (annual_rank_text + " " if annual_rank_text else "") + status
+                    fixed_above = [
+                        q for q in fixed_routes
+                        if annual_positions.get(q) and current_annual and annual_positions[q] < current_annual
+                    ]
+                    if fixed_above:
+                        shown_fixed = [display_team(q) for q in fixed_above]
+                        if len(shown_fixed) == 1:
+                            cup_text += f" (Arriba está {shown_fixed[0]}, que ya tiene una plaza directa de Libertadores.)"
+                        else:
+                            cup_text += (
+                                f" (Entre los equipos que tiene arriba están {', '.join(shown_fixed[:-1])} y {shown_fixed[-1]}, "
+                                "que ya tienen una plaza directa de Libertadores.)"
+                            )
                     cup_material = True
 
         descent_parts = []
         descent_material = False
         if annual and team in annual:
-            annual_bounds = scenario_rank_bounds(annual, games, team)
+            annual_bounds = annual_bounds_team
             danger_from = max(1, len(annual) - max(1, int(n_anual)) + 1)
             if annual_bounds.get("available"):
                 abest, aworst = int(annual_bounds["best_rank"]), int(annual_bounds["worst_rank"])
-                current_annual = annual_positions.get(team)
                 if abest >= danger_from:
                     descent_parts.append("Termina la ventana en zona de descenso por Tabla Anual")
                     descent_material = True
@@ -9276,7 +9315,7 @@ def _preview_cup_context(Z, annual):
     fixed_routes = {
         team: motive
         for team, motive in allocation.get("lib", [])
-        if "por Tabla General" not in str(motive)
+        if "arts. 27.4 a 27.6" not in str(motive)
     }
     eligible = [team for team in allocation.get("orden", []) if team not in fixed_routes and team in annual]
     return allocation, fixed_routes, eligible
@@ -9292,11 +9331,11 @@ def _scenario_range_text(scenario):
 def _cup_scenario_reading(scenario, n_lib):
     best, worst = scenario.get("best_rank"), scenario.get("worst_rank")
     if not best or not worst:
-        return "No se pudo establecer el rango en el reparto de cupos."
+        return "No se pudo establecer la situación de copas para esta ventana."
     lib_end = max(0, int(n_lib))
     cup_end = lib_end + 6
     if lib_end and worst <= lib_end:
-        return "Termina en zona de Libertadores dentro del reparto de cupos."
+        return "Termina la ventana en zona de Libertadores por la Tabla Anual."
     if lib_end and best <= lib_end:
         if worst <= cup_end:
             return "Puede quedar en Libertadores o Sudamericana."
@@ -9305,7 +9344,7 @@ def _cup_scenario_reading(scenario, n_lib):
         if worst <= cup_end:
             return "Termina al menos en zona de Sudamericana."
         return "Puede entrar a una copa o quedar afuera."
-    return "Queda fuera de los cupos por Tabla General en esta ventana."
+    return "Queda fuera de los puestos de clasificación internacional por la Tabla Anual en esta ventana."
 
 
 def _descent_scenario_reading(scenario, total_teams, n_annual):
@@ -9334,7 +9373,7 @@ def _zone_scenario_short(scenario):
 
 def _preview_reusable_line(team, objective, zone_scenarios, annual_scenarios=None,
                            direct_route="", n_lib=0, total_teams=30, n_annual=1,
-                           current_zone_rank=None):
+                           current_zone_rank=None, cup_scenarios=None):
     def lower_initial(value):
         text = str(value or "").rstrip(".")
         return text[:1].lower() + text[1:] if text else text
@@ -9352,12 +9391,19 @@ def _preview_reusable_line(team, objective, zone_scenarios, annual_scenarios=Non
             route = re.sub(r"\s*\(art\.[^)]+\)", "", str(direct_route)).strip()
             return (f"{shown} ya tiene asegurada su plaza internacional como {lower_initial(route)}; "
                     "su resultado mueve su puesto en la Tabla Anual y puede modificar el corte para los demás.")
+        if annual_scenarios and cup_scenarios:
+            parts = []
+            for label, annual_row, cup_row in zip(labels, annual_scenarios, cup_scenarios):
+                rango = _scenario_range_text(annual_row)
+                lectura = lower_initial(_cup_scenario_reading(cup_row, n_lib))
+                parts.append(f"si {label}, puede quedar {rango} en la Tabla Anual y {lectura}")
+            return f"{shown} se juega su lugar en las copas: " + "; ".join(parts) + "."
         if annual_scenarios:
             parts = [
-                f"si {label}, {lower_initial(_cup_scenario_reading(row, n_lib))}"
+                f"si {label}, puede quedar {_scenario_range_text(row)} en la Tabla Anual"
                 for label, row in zip(labels, annual_scenarios)
             ]
-            return f"{shown} se juega su lugar en las copas: " + "; ".join(parts) + "."
+            return f"{shown}: " + "; ".join(parts) + "."
     purpose = "sostenerse en zona de playoffs" if current_zone_rank and current_zone_rank <= 8 else "entrar en zona de playoffs"
     parts = [f"si {label}, {_zone_scenario_short(row)}" for label, row in zip(labels, zone_scenarios)]
     return f"{shown} se juega {purpose}: " + "; ".join(parts) + "."
@@ -9430,7 +9476,9 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None,
 
     mode = _preview_objective(objective)
     annual_scenarios = None
+    cup_scenarios = None
     direct_route = ""
+    fixed_routes = {}
     n_lib = 0
     if anual and equipo in anual:
         if mode == "descenso":
@@ -9449,16 +9497,19 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None,
                 })
         else:
             allocation, fixed_routes, eligible = _preview_cup_context(Z, anual)
+            annual_positions_for_note = {
+                row["Equipo"]: pos for pos, (_idx, row) in enumerate(liga_tabla_df(anual).iterrows(), 1)
+            }
             n_lib = int(allocation.get("n_tabla_lib", 0))
             direct_route = fixed_routes.get(equipo, "")
+            annual_scenarios = exact_result_scenarios(anual, games, equipo, own_match, len(anual))
             if direct_route:
-                annual_scenarios = exact_result_scenarios(anual, games, equipo, own_match, len(anual))
                 route = re.sub(r"\s*\(art\.[^)]+\)", "", str(direct_route)).strip()
                 for scenario in annual_scenarios:
                     points = (str(scenario["points_min"]) if scenario["points_min"] == scenario["points_max"]
                               else f"{scenario['points_min']}–{scenario['points_max']}")
                     rows.append({
-                        "Tabla": "Tabla Anual · plaza directa",
+                        "Tabla": "Copas · Tabla Anual",
                         result_column: scenario["result"].lower(),
                         "Puntos al cierre": points,
                         "Mejor puesto": _ord(scenario["best_rank"]) if scenario["best_rank"] else "—",
@@ -9467,17 +9518,17 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None,
                     })
             elif equipo in eligible:
                 eligible_base = {team: anual[team] for team in eligible}
-                annual_scenarios = exact_result_scenarios(eligible_base, games, equipo, own_match, len(eligible_base))
-                for scenario in annual_scenarios:
-                    points = (str(scenario["points_min"]) if scenario["points_min"] == scenario["points_max"]
-                              else f"{scenario['points_min']}–{scenario['points_max']}")
+                cup_scenarios = exact_result_scenarios(eligible_base, games, equipo, own_match, len(eligible_base))
+                for annual_scenario, cup_scenario in zip(annual_scenarios, cup_scenarios):
+                    points = (str(annual_scenario["points_min"]) if annual_scenario["points_min"] == annual_scenario["points_max"]
+                              else f"{annual_scenario['points_min']}–{annual_scenario['points_max']}")
                     rows.append({
-                        "Tabla": "Copas · reparto de cupos",
-                        result_column: scenario["result"].lower(),
+                        "Tabla": "Copas · Tabla Anual",
+                        result_column: annual_scenario["result"].lower(),
                         "Puntos al cierre": points,
-                        "Mejor puesto": _ord(scenario["best_rank"]) if scenario["best_rank"] else "—",
-                        "Peor puesto": _ord(scenario["worst_rank"]) if scenario["worst_rank"] else "—",
-                        "Lectura": _cup_scenario_reading(scenario, n_lib),
+                        "Mejor puesto": _ord(annual_scenario["best_rank"]) if annual_scenario["best_rank"] else "—",
+                        "Peor puesto": _ord(annual_scenario["worst_rank"]) if annual_scenario["worst_rank"] else "—",
+                        "Lectura": _cup_scenario_reading(cup_scenario, n_lib),
                     })
 
     win, draw, loss = zone_scenarios[0], zone_scenarios[1], zone_scenarios[2]
@@ -9496,10 +9547,43 @@ def lpf_previa_equipo_texto(equipo, Z, rest, pend, anual, prom, fecha=None,
                  "Cuando dos equipos terminan igualados, el rango incluye tanto el desempate favorable como el adverso; "
                  "no inventa marcadores futuros ni afirma quién ganará por DG, GF, mano a mano, fair play o sorteo._")
 
+    if mode in ("copas", "libertadores") and annual_scenarios:
+        annual_table = liga_tabla_df(anual)
+        annual_hit = annual_table.index[annual_table["Equipo"] == equipo].tolist()
+        current_annual_rank = int(annual_hit[0] + 1) if annual_hit else None
+        lines.append("### Copas · Tabla Anual")
+        if current_annual_rank:
+            intro = f"Hoy está **{_ord(current_annual_rank)} en la Tabla Anual**."
+            fixed_above = [
+                q for q in fixed_routes
+                if q in anual and q != equipo and annual_positions_for_note.get(q, 10_000) < current_annual_rank
+            ] if 'annual_positions_for_note' in locals() else []
+            if fixed_above:
+                shown = [display_team(q) for q in fixed_above]
+                if len(shown) == 1:
+                    intro += f" (Arriba está **{shown[0]}**, que ya tiene una plaza directa de Libertadores.)"
+                else:
+                    intro += (f" (Entre los equipos que tiene arriba están **{', '.join(shown[:-1])}** y **{shown[-1]}**, "
+                              "que ya tienen una plaza directa de Libertadores.)")
+            lines.append(intro)
+        labels_caps = ("gana", "empata", "pierde")
+        if direct_route:
+            for label, annual_row in zip(labels_caps, annual_scenarios):
+                lines.append(
+                    f"**Si {label}**, su mejor posición posible en la Tabla Anual es {_ord(annual_row['best_rank'])} "
+                    f"y la peor {_ord(annual_row['worst_rank'])}. Ya tiene la plaza internacional asegurada por otra vía."
+                )
+        elif cup_scenarios:
+            for label, annual_row, cup_row in zip(labels_caps, annual_scenarios, cup_scenarios):
+                lines.append(
+                    f"**Si {label}**, su mejor posición posible en la Tabla Anual es {_ord(annual_row['best_rank'])} "
+                    f"y la peor {_ord(annual_row['worst_rank'])}; {_cup_scenario_reading(cup_row, n_lib)[:1].lower() + _cup_scenario_reading(cup_row, n_lib)[1:]}"
+                )
+
     n_annual = int((st.session_state.get("ESTADO") or {}).get("n_anual", 1))
     reusable = _preview_reusable_line(
         equipo, mode, zone_scenarios, annual_scenarios, direct_route, n_lib,
-        len(anual or {}), n_annual, current_zone_rank,
+        len(anual or {}), n_annual, current_zone_rank, cup_scenarios,
     )
     frame = pd.DataFrame(rows)
     frame.attrs["export_title"] = f"{display_team(equipo)} · escenarios del próximo partido"
