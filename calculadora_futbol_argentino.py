@@ -1,7 +1,7 @@
 """
 ⚽ Calculadora de escenarios — LPF 2026
 Convertido de Jupyter Notebook (v2) a Streamlit
-Actualización 3.7.14: reconciliación de tablas atrasadas con resultados finales confirmados.
+Actualización 3.7.15: identidad única de partidos y reparación de dobles contabilizaciones.
 Mantiene la mejora 3.7.13 para rangos amplios y narrativa respecto del corte.
 """
 
@@ -6603,16 +6603,42 @@ def parse_resultados_lpf(text=None, canon=None):
         out.append((canon(m.group(1)), canon(m.group(4)), int(m.group(2)), int(m.group(3))))
     return out
 
-def _merge_lpf_results(*collections):
-    """Une resultados canónicos sin perder la última foto válida.
+def _lpf_normalize_result_identity(local, visitor, gl, gv):
+    """Normaliza un marcador contra la identidad oficial del partido.
 
-    Un marcador explícito más nuevo puede reemplazar a uno anterior para la misma
-    pareja, pero una respuesta vacía nunca borra la base que ya estaba validada.
+    Algunas fuentes pueden publicar la misma ficha con local/visitante invertidos
+    o con alias distintos. En el Clausura 2026 cada pareja aparece una sola vez en
+    el fixture, por lo que la orientación oficial permite reconocer el mismo partido
+    antes de sumar PJ, puntos o goles.
+    """
+    cl, cv = canon_club(local), canon_club(visitor)
+    gl, gv = int(gl), int(gv)
+    try:
+        fixture_pairs = {
+            (canon_club(row.get("l") or row.get("home") or ""),
+             canon_club(row.get("v") or row.get("away") or ""))
+            for row in LPF_FIXTURE
+        }
+    except Exception:
+        fixture_pairs = set()
+    direct = (cl, cv) in fixture_pairs
+    reverse = (cv, cl) in fixture_pairs
+    if reverse and not direct:
+        return cv, cl, gv, gl
+    return cl, cv, gl, gv
+
+
+def _merge_lpf_results(*collections):
+    """Une resultados por identidad oficial sin perder la última foto válida.
+
+    Un marcador explícito más nuevo puede reemplazar a uno anterior para el mismo
+    partido. También colapsa la misma ficha si una fuente la entrega con los clubes
+    invertidos, evitando que un resultado se contabilice dos veces.
     """
     merged = {}
     for collection in collections:
         for local, visitor, gl, gv in collection or []:
-            cl, cv = canon_club(local), canon_club(visitor)
+            cl, cv, gl, gv = _lpf_normalize_result_identity(local, visitor, gl, gv)
             merged[(cl, cv)] = (cl, cv, int(gl), int(gv))
     return list(merged.values())
 
@@ -6626,9 +6652,9 @@ def _lpf_result_counts(played):
 
 
 def _lpf_result_stats(played):
-    """Reconstruye PJ, puntos y goles de cada club desde los marcadores."""
+    """Reconstruye PJ, puntos y goles sin contar dos veces la misma ficha."""
     stats = {}
-    for local, visitor, gl, gv in played or []:
+    for local, visitor, gl, gv in _merge_lpf_results(played):
         local, visitor = canon_club(local), canon_club(visitor)
         gl, gv = int(gl), int(gv)
         for team in (local, visitor):
@@ -6681,6 +6707,70 @@ def _lpf_reorder_source_positions(base):
         row["source_pos"] = pos
         out[team] = row
     return out
+
+
+def _lpf_repair_single_duplicate_in_zones(zones, played):
+    """Revierte una doble contabilización inequívoca de un resultado ya jugado.
+
+    Se usa para sanear fotos guardadas por versiones anteriores. Sólo actúa si la
+    tabla tiene exactamente un partido de más, únicamente dos clubes difieren y el
+    exceso de PJ/puntos/GF/GC/DG equivale a repetir una ficha final ya confirmada.
+    """
+    zones = {label: canon_base(base) for label, base in (zones or {}).items()}
+    played = _merge_lpf_results(played)
+    if set(zones) != {"A", "B"} or not played:
+        return zones, ""
+    old_count = expected_played_count(zones)
+    if old_count is None or old_count != len(played) + 1:
+        return zones, ""
+    stats = _lpf_result_stats(played)
+    teams = {team for base in zones.values() for team in base}
+    if not teams.issubset(stats):
+        return zones, ""
+
+    changed = []
+    keys = ("pj", "pts", "gf", "ga", "dg")
+    for base in zones.values():
+        for team, row in base.items():
+            delta = {k: int(row.get(k, 0)) - int(stats[team].get(k, 0)) for k in keys}
+            if any(delta.values()):
+                changed.append((team, delta))
+    if len(changed) != 2 or any(delta["pj"] != 1 for _team, delta in changed):
+        return zones, ""
+    a, b = changed[0][0], changed[1][0]
+    matches = [r for r in played if {canon_club(r[0]), canon_club(r[1])} == {a, b}]
+    if len(matches) != 1:
+        return zones, ""
+    home, away, gh, ga = matches[0]
+    contrib = {
+        home: {"pj": 1, "pts": 3 if gh > ga else 1 if gh == ga else 0,
+               "gf": gh, "ga": ga, "dg": gh - ga},
+        away: {"pj": 1, "pts": 3 if ga > gh else 1 if gh == ga else 0,
+               "gf": ga, "ga": gh, "dg": ga - gh},
+    }
+    deltas = dict(changed)
+    if any(deltas[team] != contrib[team] for team in (home, away)):
+        return zones, ""
+
+    rebuilt = {}
+    for label, base in zones.items():
+        rows = {}
+        for team, old in base.items():
+            row = {key: int(stats[team].get(key, 0)) for key in keys}
+            if old.get("source_pos") is not None:
+                row["source_pos"] = int(old.get("source_pos"))
+            rows[team] = row
+        rebuilt[label] = _lpf_reorder_source_positions(rows)
+    try:
+        _validate_lpf_tables(rebuilt)
+    except Exception:
+        return zones, ""
+    if not _lpf_results_fit_zones(rebuilt, played):
+        return zones, ""
+    return rebuilt, (
+        f"Se corrigió una doble contabilización de {home} {gh}-{ga} {away}: "
+        "la tabla guardada tenía un PJ extra para ambos clubes."
+    )
 
 
 def _lpf_advance_zones_from_confirmed_results(zones, played):
@@ -7226,6 +7316,7 @@ def cargar_lpf_todo():
     previous_played = list(((st.session_state.get("ESTADO") or {}).get("jugados") or []))
     builtin_played = _lpf_builtin_results()
     offline_forward = _merge_lpf_results(builtin_played, previous_played, manual_played)
+    zones, _offline_duplicate_note = _lpf_repair_single_duplicate_in_zones(zones, offline_forward)
     zones, _offline_reconcile_note = _lpf_advance_zones_from_confirmed_results(
         zones, offline_forward
     )
@@ -7277,6 +7368,7 @@ def cargar_lpf_espn(liga="arg.1"):
         cl, cv = canon_club(local), canon_club(visitor)
         if cl in eqset and cv in eqset:
             espn_played.append((cl, cv, int(gl), int(gv)))
+    espn_played = _merge_lpf_results(espn_played)
 
     fa_played = []
     fa_error = ""
@@ -7288,6 +7380,7 @@ def cargar_lpf_espn(liga="arg.1"):
             for local, visitor, gl, gv in (fa_played or [])
             if canon_club(local) in eqset and canon_club(visitor) in eqset
         ]
+        fa_played = _merge_lpf_results(fa_played)
     except Exception as exc:
         fa_error = str(exc)
 
@@ -7303,12 +7396,14 @@ def cargar_lpf_espn(liga="arg.1"):
     forward_results = _merge_lpf_results(
         builtin_played, previous_played, fa_played, espn_played, manual_played
     )
+    zones, duplicate_repair_note = _lpf_repair_single_duplicate_in_zones(zones, forward_results)
     zones, standings_reconcile_note = _lpf_advance_zones_from_confirmed_results(
         zones, forward_results
     )
+    reconcile_note = standings_reconcile_note or duplicate_repair_note
     reconciled_annual = {}
-    if standings_reconcile_note:
-        source_warnings = list(source_warnings or []) + [standings_reconcile_note]
+    if reconcile_note:
+        source_warnings = list(source_warnings or []) + [reconcile_note]
         source_name = f"{source_name} + resultados finales conciliados"
         # La Anual puede venir atrasada por el mismo partido. Se la reconstruye desde
         # el Apertura fijo + las zonas ya avanzadas y sólo se usa el orden anterior
@@ -7443,7 +7538,7 @@ def cargar_lpf_espn(liga="arg.1"):
         opening=st.session_state.get("LPF_APERTURA") or {},
     )
     st.session_state.ESTADO = state
-    if standings_reconcile_note and state.get("anual_directo"):
+    if reconcile_note and state.get("anual_directo"):
         disk_warning = _save_lpf_snapshot(
             zones, state.get("anual_directo") or {}, source_name
         )
@@ -7466,7 +7561,7 @@ def cargar_lpf_espn(liga="arg.1"):
                 ("FutbolArgentino.com", fa_played),
                 ("ESPN", espn_played),
             ) if rows]
-            + (["conciliación por resultados finales"] if standings_reconcile_note else [])
+            + (["conciliación por resultados finales"] if reconcile_note else [])
         ) or "base validada",
         "url_resultados": fa_url,
     }, None
@@ -7590,7 +7685,7 @@ with st.sidebar:
                 )
 
             st.rerun()
-    ui_caption("Para las tablas intenta ESPN y FutbolArgentino.com; para los resultados coteja ambas fuentes y sólo acepta una combinación consistente. Si un resultado final confirmado llega antes que la tabla, puede avanzar esa tabla únicamente cuando todos los PJ, puntos y goles cierran sin contradicciones. "
+    ui_caption("Para las tablas intenta ESPN y FutbolArgentino.com; para los resultados coteja ambas fuentes y sólo acepta una combinación consistente. Si un resultado final confirmado llega antes que la tabla, puede avanzar esa tabla únicamente cuando todos los PJ, puntos y goles cierran sin contradicciones; cada partido se identifica contra el fixture oficial para impedir dobles contabilizaciones. "
                "_La Tabla Anual se recalcula automáticamente desde el Apertura fijo; revisá el semáforo después de actualizar._")
     with st.expander("\U0001F6E0\ufe0f Otras formas de cargar o editar a mano (avanzado)", expanded=False):
         modo_carga = st.radio("Fuente", ["🇦🇷 LPF 2026 (Clausura: zonas A y B)", "Otra liga / copa (avanzado)"], label_visibility="collapsed")
