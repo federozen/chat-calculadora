@@ -1,7 +1,8 @@
 """
 ⚽ Calculadora de escenarios — LPF 2026
 Convertido de Jupyter Notebook (v2) a Streamlit
-Actualización 3.7.11: lenguaje argentino para explicar el reparto de cupos.
+Actualización 3.7.14: reconciliación de tablas atrasadas con resultados finales confirmados.
+Mantiene la mejora 3.7.13 para rangos amplios y narrativa respecto del corte.
 """
 
 import streamlit as st
@@ -2744,12 +2745,11 @@ def futbolargentino_fixture(zones, timeout=30):
         expected_played=None,
     )
     played, pending = played_pending_from_records(records)
-    expected = expected_played_count(zones)
-    if expected is not None and len(played) > expected:
-        raise RuntimeError(
-            f"la fuente devolvió {len(played)} resultados, más que los {expected} "
-            "partidos implícitos en las zonas"
-        )
+    # No descartar una fuente porque tenga más finales que la tabla de posiciones.
+    # Ese es precisamente el caso que ocurre cuando un pendiente termina y el feed
+    # de resultados se actualiza antes que el de standings. La reconciliación se hace
+    # después, de forma transaccional, y sólo si los marcadores avanzan la tabla sin
+    # contradecir ninguno de sus datos ya publicados.
     return played, pending, " · ".join(dict.fromkeys(final_urls))
 
 
@@ -6656,6 +6656,118 @@ def _lpf_results_fit_zones(zones, played):
     return not _lpf_results_mismatches(zones, played)
 
 
+def _lpf_reorder_source_positions(base):
+    """Recalcula la posición publicada tras avanzar una tabla por resultados.
+
+    Los criterios visibles (PTS, DG y GF) mandan. Si dos clubes siguen exactamente
+    empatados se conserva como último desempate el orden de la fuente previa, en vez
+    de inventar uno alfabético.
+    """
+    base = canon_base(base or {})
+    original_order = {team: idx for idx, team in enumerate(base)}
+    ranked = sorted(
+        base,
+        key=lambda team: (
+            -int(base[team].get("pts", 0)),
+            -int(base[team].get("dg", 0)),
+            -int(base[team].get("gf", 0)),
+            int(base[team].get("source_pos", 10_000 + original_order[team])),
+            original_order[team],
+        ),
+    )
+    out = {}
+    for pos, team in enumerate(ranked, 1):
+        row = dict(base[team])
+        row["source_pos"] = pos
+        out[team] = row
+    return out
+
+
+def _lpf_advance_zones_from_confirmed_results(zones, played):
+    """Avanza una tabla atrasada usando una foto completa de resultados finales.
+
+    Se acepta sólo una actualización hacia adelante: los resultados deben contener
+    más partidos que la tabla y reproducir *exactamente* a todos los clubes que no
+    jugaron esos encuentros nuevos. Para los que sí avanzan, PJ, puntos, GF y GC no
+    pueden retroceder. De esta manera un feed de resultados que llega primero puede
+    poner al día el standings sin permitir que un marcador parcial o una base
+    incompleta reescriba la tabla.
+    """
+    zones = {label: canon_base(base) for label, base in (zones or {}).items()}
+    played = _merge_lpf_results(played)
+    if set(zones) != {"A", "B"} or not played:
+        return zones, ""
+
+    fixture_pairs = {
+        (canon_club(row.get("l") or row.get("home") or ""),
+         canon_club(row.get("v") or row.get("away") or ""))
+        for row in LPF_FIXTURE
+    }
+    if any((canon_club(l), canon_club(v)) not in fixture_pairs for l, v, _gl, _gv in played):
+        return zones, ""
+
+    old_count = expected_played_count(zones)
+    if old_count is None or len(played) <= old_count:
+        return zones, ""
+
+    result_stats = _lpf_result_stats(played)
+    teams = {team for base in zones.values() for team in base}
+    if not teams.issubset(result_stats):
+        return zones, ""
+
+    advanced = []
+    numeric_keys = ("pj", "pts", "gf", "ga", "dg")
+    for base in zones.values():
+        for team, old in base.items():
+            new = result_stats.get(team) or {}
+            old_pj, new_pj = int(old.get("pj", 0)), int(new.get("pj", 0))
+            if new_pj < old_pj:
+                return zones, ""
+            if new_pj == old_pj:
+                # Un club que no sumó PJ debe quedar idéntico. Si no, la colección
+                # de resultados contiene una corrección/conflicto histórico y no es
+                # segura para avanzar automáticamente.
+                if any(int(new.get(k, 0)) != int(old.get(k, 0)) for k in numeric_keys):
+                    return zones, ""
+                continue
+            if any(int(new.get(k, 0)) < int(old.get(k, 0)) for k in ("pts", "gf", "ga")):
+                return zones, ""
+            advanced.append(team)
+
+    delta_matches = len(played) - old_count
+    delta_pj = sum(
+        int(result_stats[team].get("pj", 0)) - int(row.get("pj", 0))
+        for base in zones.values() for team, row in base.items()
+    )
+    if delta_pj != 2 * delta_matches or not advanced:
+        return zones, ""
+
+    rebuilt = {}
+    for label, base in zones.items():
+        rows = {}
+        for team, old in base.items():
+            stats = result_stats[team]
+            row = {key: int(stats.get(key, 0)) for key in numeric_keys}
+            if old.get("source_pos") is not None:
+                row["source_pos"] = int(old.get("source_pos"))
+            rows[team] = row
+        rebuilt[label] = _lpf_reorder_source_positions(rows)
+
+    try:
+        _validate_lpf_tables(rebuilt)
+    except Exception:
+        return zones, ""
+    if not _lpf_results_fit_zones(rebuilt, played):
+        return zones, ""
+
+    note = (
+        f"La tabla de posiciones venía {delta_matches} partido(s) atrás y se avanzó "
+        f"con {len(played)} resultados finales confirmados. Clubes actualizados: "
+        + ", ".join(sorted(advanced)) + "."
+    )
+    return rebuilt, note
+
+
 def _lpf_results_mismatches(zones, played, limit=None):
     """Detalla qué clubes no cierran entre marcadores y tabla publicada.
 
@@ -7112,12 +7224,17 @@ def cargar_lpf_todo():
         st.session_state.LPF_HIST_OK = f"{len(st.session_state.LPF_ANUAL)} equipos en la anual · {len(_pv0)} en promedios"
     manual_played = parse_resultados_lpf(st.session_state.get("LPF_RES_TXT") or "")
     previous_played = list(((st.session_state.get("ESTADO") or {}).get("jugados") or []))
+    builtin_played = _lpf_builtin_results()
+    offline_forward = _merge_lpf_results(builtin_played, previous_played, manual_played)
+    zones, _offline_reconcile_note = _lpf_advance_zones_from_confirmed_results(
+        zones, offline_forward
+    )
     played = _lpf_complete_results_for_zones(
         zones,
         manual_played,
         previous_played,
-        _lpf_builtin_results(),
-    ) or _merge_lpf_results(previous_played, manual_played, _lpf_builtin_results())
+        builtin_played,
+    ) or _merge_lpf_results(previous_played, manual_played, builtin_played)
     if played and not st.session_state.get("LPF_RES_TXT"):
         st.session_state.LPF_RES_TXT = "\n".join(
             f"{local} {gl}-{gv} {visitor}" for local, visitor, gl, gv in played
@@ -7178,6 +7295,36 @@ def cargar_lpf_espn(liga="arg.1"):
     previous_played = list(previous_state.get("jugados") or [])
     manual_played = parse_resultados_lpf(st.session_state.get("LPF_RES_TXT") or "")
     builtin_played = _lpf_builtin_results()
+
+    # Si el scoreboard ya confirmó uno o más finales pero el standings todavía no
+    # los incorporó, avanzar la tabla desde los marcadores antes de exigir que ambas
+    # fuentes coincidan. Manual conserva máxima prioridad; ESPN prevalece sobre FA
+    # sólo ante una corrección explícita del mismo partido.
+    forward_results = _merge_lpf_results(
+        builtin_played, previous_played, fa_played, espn_played, manual_played
+    )
+    zones, standings_reconcile_note = _lpf_advance_zones_from_confirmed_results(
+        zones, forward_results
+    )
+    reconciled_annual = {}
+    if standings_reconcile_note:
+        source_warnings = list(source_warnings or []) + [standings_reconcile_note]
+        source_name = f"{source_name} + resultados finales conciliados"
+        # La Anual puede venir atrasada por el mismo partido. Se la reconstruye desde
+        # el Apertura fijo + las zonas ya avanzadas y sólo se usa el orden anterior
+        # como último desempate cuando PTS, DG y GF siguen exactamente igualados.
+        opening_for_reconcile = canon_base(
+            st.session_state.get("LPF_APERTURA") or globals().get("LPF_APERTURA_BASE_2026") or {}
+        )
+        if _lpf_opening_is_valid(opening_for_reconcile, zones):
+            rebuilt_annual = sum_opening_and_zones(opening_for_reconcile, zones)
+            for team, row in rebuilt_annual.items():
+                previous_pos = ((annual or {}).get(team) or {}).get("source_pos")
+                if previous_pos is not None:
+                    row["source_pos"] = int(previous_pos)
+            reconciled_annual = _lpf_reorder_source_positions(rebuilt_annual)
+            st.session_state.LPF_ANUAL = canon_base(reconciled_annual)
+
     # Primero se preserva la foto ya validada y las fuentes automáticas sólo
     # completan parejas que todavía faltan. Si esa estrategia no alcanza, el
     # reconciliador igualmente prueba luego candidatos con prioridad de fuente,
@@ -7292,10 +7439,16 @@ def cargar_lpf_espn(liga="arg.1"):
     state, report = _lpf_rebuild_state(
         zones,
         played=played,
-        annual_direct=st.session_state.get("LPF_ANUAL") or {},
+        annual_direct=(reconciled_annual or st.session_state.get("LPF_ANUAL") or {}),
         opening=st.session_state.get("LPF_APERTURA") or {},
     )
     st.session_state.ESTADO = state
+    if standings_reconcile_note and state.get("anual_directo"):
+        disk_warning = _save_lpf_snapshot(
+            zones, state.get("anual_directo") or {}, source_name
+        )
+        if disk_warning:
+            source_warnings = list(source_warnings or []) + [disk_warning]
     return {
         "A": len(zones.get("A", {})),
         "B": len(zones.get("B", {})),
@@ -7309,11 +7462,12 @@ def cargar_lpf_espn(liga="arg.1"):
         "fuente": source_name,
         "avisos_fuente": list(source_warnings or []) + result_source_warnings,
         "fuente_resultados": " + ".join(
-            name for name, rows in (
+            [name for name, rows in (
                 ("FutbolArgentino.com", fa_played),
                 ("ESPN", espn_played),
-            ) if rows
-        ),
+            ) if rows]
+            + (["conciliación por resultados finales"] if standings_reconcile_note else [])
+        ) or "base validada",
         "url_resultados": fa_url,
     }, None
 
@@ -7436,7 +7590,7 @@ with st.sidebar:
                 )
 
             st.rerun()
-    ui_caption("Para las tablas intenta ESPN y FutbolArgentino.com; para los resultados coteja ambas fuentes y sólo acepta una combinación que reconstruya PJ, puntos y goles. Si ninguna coincide, conserva la última base válida. "
+    ui_caption("Para las tablas intenta ESPN y FutbolArgentino.com; para los resultados coteja ambas fuentes y sólo acepta una combinación consistente. Si un resultado final confirmado llega antes que la tabla, puede avanzar esa tabla únicamente cuando todos los PJ, puntos y goles cierran sin contradicciones. "
                "_La Tabla Anual se recalcula automáticamente desde el Apertura fijo; revisá el semáforo después de actualizar._")
     with st.expander("\U0001F6E0\ufe0f Otras formas de cargar o editar a mano (avanzado)", expanded=False):
         modo_carga = st.radio("Fuente", ["🇦🇷 LPF 2026 (Clausura: zonas A y B)", "Otra liga / copa (avanzado)"], label_visibility="collapsed")
@@ -8571,12 +8725,22 @@ def lpf_que_se_juega_fecha(
             best = int(bounds["best_rank"])
             worst = int(bounds["worst_rank"])
             rank_text = _range(best, worst)
+            short_window = (worst - best + 1) <= 5
             if current <= _LPF_TOP_OCTAVOS and worst <= _LPF_TOP_OCTAVOS:
-                playoff_text = f"Ya aseguró cerrar entre los ocho; puede quedar {rank_text} por puntos."
+                if short_window:
+                    playoff_text = f"Ya aseguró cerrar entre los ocho; puede quedar {rank_text} por puntos."
+                else:
+                    playoff_text = f"Ya aseguró cerrar entre los ocho; puede subir hasta {_ord(best)} por puntos."
             elif current <= _LPF_TOP_OCTAVOS:
-                playoff_text = f"Puede sostenerse o salir de playoffs; su rango es {rank_text} por puntos."
+                if short_window:
+                    playoff_text = f"Puede sostenerse o salir de playoffs; su rango es {rank_text} por puntos."
+                else:
+                    playoff_text = f"Comienza dentro de los playoffs; puede subir hasta {_ord(best)}, pero también terminar la fecha fuera de los ocho."
             elif best <= _LPF_TOP_OCTAVOS:
-                playoff_text = f"Puede entrar a playoffs o seguir afuera; su rango es {rank_text} por puntos."
+                if short_window:
+                    playoff_text = f"Puede entrar a playoffs o seguir afuera; su rango es {rank_text} por puntos."
+                else:
+                    playoff_text = f"Parte fuera de los playoffs; puede subir hasta {_ord(best)} y tiene escenarios para entrar entre los ocho, aunque también puede continuar afuera."
             else:
                 playoff_text = f"No puede entrar a playoffs en esta ventana; su mejor puesto por puntos es {_ord(best)}."
 
