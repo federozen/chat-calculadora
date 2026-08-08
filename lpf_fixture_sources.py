@@ -192,6 +192,13 @@ def _status(value: object) -> str | None:
     for label, status in _STATUS_MAP.items():
         if text == _ascii(label) or text.startswith(_ascii(label) + " "):
             return status
+    # FutbolArgentino.com muestra el minuto (por ejemplo, 87' o 45+2')
+    # en el lugar del estado mientras el partido está en juego. Conservar el
+    # registro como live evita descartarlo, pero nunca lo convierte en resultado final.
+    if re.fullmatch(r"\d{1,3}(?:\+\d{1,2})?['’]?", str(value or "").strip()):
+        return "live"
+    if text in {"entretiempo", "descanso", "medio tiempo"}:
+        return "live"
     return None
 
 
@@ -364,14 +371,16 @@ def parse_futbolargentino_results_html(
             i += 1
             continue
 
-        # Estructura visible esperada: local, hora, marcador, visitante, estado.
-        # Se toleran uno o dos textos accesorios entre campos.
+        # Estructura visible habitual: local, hora, marcador, visitante, estado.
+        # La hora es opcional: el proveedor puede omitirla o moverla en el DOM
+        # cuando actualiza un partido en vivo/final. Para reconocer un resultado
+        # alcanzan marcador + rival + estado, siempre filtrados contra el fixture.
         time_idx = score_idx = away_idx = status_idx = None
         clock = None
         result = None
         away = None
         status = None
-        upper = min(len(tokens), i + 10)
+        upper = min(len(tokens), i + 14)
         for j in range(i + 1, upper):
             if re.search(r"\bFecha\s+\d+\b", tokens[j], flags=re.I) or parse_spanish_date(tokens[j]):
                 break
@@ -380,7 +389,7 @@ def parse_futbolargentino_results_html(
                 if parsed_clock:
                     time_idx, clock = j, parsed_clock
                     continue
-            if time_idx is not None and score_idx is None:
+            if score_idx is None:
                 parsed_score = _score(tokens[j])
                 if parsed_score:
                     score_idx, result = j, parsed_score
@@ -396,7 +405,7 @@ def parse_futbolargentino_results_html(
                     status_idx, status = j, parsed_status
                     break
 
-        if not all(value is not None for value in (time_idx, score_idx, away_idx, status_idx)):
+        if not all(value is not None for value in (score_idx, away_idx, status_idx)):
             i += 1
             continue
         key = (home, away)
@@ -406,7 +415,7 @@ def parse_futbolargentino_results_html(
         meta = fixture_index[key]
         effective_round = int(meta.get("round") or round_number or 0)
         home_score = away_score = None
-        if status == "played" and result is not None:
+        if status in {"played", "live"} and result is not None:
             home_score, away_score = result
         text_records.append({
             "match_id": f"FA-F{effective_round:02d}-{_compact(home)}-{_compact(away)}",
